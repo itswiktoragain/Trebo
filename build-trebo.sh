@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Trebo remaster build entrypoint
 set -Eeuo pipefail
 
 BASE_ISO_URL="https://releases.ubuntu.com/focal/ubuntu-20.04.6-desktop-amd64.iso"
