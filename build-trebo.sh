@@ -61,8 +61,38 @@ apt-get install -y --no-install-recommends \
   plymouth plymouth-theme-spinner plymouth-label
 
 mapfile -t purge_candidates < <(
-  dpkg-query -W -f='${Package}\n' 2>/dev/null | \
-  grep -E '^(ubuntu-desktop|ubuntu-desktop-minimal|ubuntu-minimal|ubuntu-standard|ubuntu-session|ubuntu-settings|ubuntu-wallpapers.*|ubuntu-docs|ubuntu-report|ubuntu-mono|ubuntu-touch-sounds|ubuntu-sounds|ubuntu-artwork|branding-ubuntu|fonts-ubuntu|gnome-shell-extension-ubuntu-dock)
+  dpkg-query -W -f='\${Package}\\n' 2>/dev/null | \\
+  grep -E '^(ubuntu-desktop|ubuntu-desktop-minimal|ubuntu-minimal|ubuntu-standard|ubuntu-session|ubuntu-settings|ubuntu-wallpapers.*|ubuntu-docs|ubuntu-report|ubuntu-mono|ubuntu-touch-sounds|ubuntu-sounds|ubuntu-artwork|branding-ubuntu|fonts-ubuntu|gnome-shell-extension-ubuntu-dock)$' || true
+)
+
+# Never allow branding removal to pull GNOME, Ubiquity, GTK, GDM, or other system components with it.
+for pkg in "\${purge_candidates[@]}"; do
+  mapfile -t would_remove < <(apt-get -s purge "$pkg" 2>/dev/null | awk '$1 == "Remv" {print $2}')
+  if (( \${#would_remove[@]} == 1 )) && [[ "\${would_remove[0]}" == "$pkg" ]]; then
+    apt-get purge -y "$pkg"
+  else
+    echo "Keeping dependency-sensitive package $pkg; neutralizing its visible branding instead."
+  fi
+done
+
+# Keep only the generic GNOME session visible and remove Ubuntu-specific shell payloads.
+rm -f \
+  /usr/share/xsessions/ubuntu.desktop \
+  /usr/share/xsessions/ubuntu-xorg.desktop \
+  /usr/share/wayland-sessions/ubuntu.desktop \
+  /usr/share/wayland-sessions/ubuntu-wayland.desktop
+rm -rf /usr/share/gnome-shell/extensions/ubuntu-dock@ubuntu.com
+find /usr/share/backgrounds -maxdepth 2 -type f -iname '*ubuntu*' -delete 2>/dev/null || true
+find /usr/share/help -maxdepth 3 -type d -name 'ubuntu-help' -prune -exec rm -rf {} + 2>/dev/null || true
+
+# Reassert the desktop and installer after cleanup.
+apt-get -f install -y
+apt-get install -y --no-install-recommends \
+  gdm3 gnome-shell gnome-session gnome-control-center gnome-terminal nautilus \
+  gnome-settings-daemon gnome-tweaks adwaita-icon-theme \
+  plymouth plymouth-theme-spinner plymouth-label ubiquity ubiquity-frontend-gtk
+
+apt-get clean
 rm -rf /var/lib/apt/lists/*
 
 cat > /etc/os-release <<'EOF_OS'
