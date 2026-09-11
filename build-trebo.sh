@@ -107,7 +107,12 @@ HOME_URL="https://github.com/itswiktoragain/Trebo"
 SUPPORT_URL="https://github.com/itswiktoragain/Trebo"
 BUG_REPORT_URL="https://github.com/itswiktoragain/Trebo/issues"
 EOF_OS
-cp /etc/os-release /usr/lib/os-release
+# /etc/os-release is normally a symlink to /usr/lib/os-release on Ubuntu.
+# Copy only when they are genuinely different files; cp exits with status 1
+# when asked to copy a file onto itself, which would abort this build.
+if [[ "$(readlink -f /etc/os-release)" != "$(readlink -f /usr/lib/os-release)" ]]; then
+  cp /etc/os-release /usr/lib/os-release
+fi
 cat > /etc/lsb-release <<'EOF_LSB'
 DISTRIB_ID=Trebo
 DISTRIB_RELEASE=20.04
