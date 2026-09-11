@@ -53,7 +53,7 @@ apt-get install -y --no-install-recommends   gdm3 gnome-shell gnome-session gnom
 
 mapfile -t purge_pkgs < <(
   dpkg-query -W -f='${binary:Package}
-' 2>/dev/null |   grep -E '^(ubuntu-desktop|ubuntu-desktop-minimal|ubuntu-minimal|ubuntu-standard|ubuntu-session|ubuntu-settings|ubuntu-wallpapers[^:]*|ubuntu-docs|ubuntu-report|gnome-shell-extension-ubuntu-dock)(:.*)?$' || true
+' 2>/dev/null |   grep -E '^(ubuntu-desktop|ubuntu-desktop-minimal|ubuntu-minimal|ubuntu-standard|ubuntu-session|ubuntu-settings|ubuntu-wallpapers[^:]*|ubuntu-docs|ubuntu-report|ubuntu-mono|ubuntu-touch-sounds|ubuntu-sounds|ubuntu-artwork|branding-ubuntu|fonts-ubuntu|gnome-shell-extension-ubuntu-dock)(:.*)?$' || true
 )
 if ((${#purge_pkgs[@]})); then
   apt-get purge -y "${purge_pkgs[@]}"
