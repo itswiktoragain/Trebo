@@ -61,7 +61,7 @@ apt-get install -y --no-install-recommends \
   plymouth plymouth-theme-spinner plymouth-label
 
 mapfile -t purge_candidates < <(
-  dpkg-query -W -f='${Package}\\n' 2>/dev/null | \
+  dpkg-query -W -f='${Package}\n' 2>/dev/null | \
   grep -E '^(ubuntu-desktop|ubuntu-desktop-minimal|ubuntu-minimal|ubuntu-standard|ubuntu-session|ubuntu-settings|ubuntu-wallpapers.*|ubuntu-docs|ubuntu-report|ubuntu-mono|ubuntu-touch-sounds|ubuntu-sounds|ubuntu-artwork|branding-ubuntu|fonts-ubuntu|gnome-shell-extension-ubuntu-dock)$' || true
 )
 
