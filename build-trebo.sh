@@ -36,8 +36,8 @@ chmod -R u+w "$ISO_DIR"
 unsquashfs -d "$ROOTFS" "$ISO_DIR/casper/filesystem.squashfs"
 
 mkdir -p "$ROOTFS/tmp/trebo-assets"
-base64 -d "$SCRIPT_DIR/assets/background.b64" > "$ROOTFS/tmp/trebo-assets/background.png"
-base64 -d "$SCRIPT_DIR/assets/logo.b64" > "$ROOTFS/tmp/trebo-assets/logo.png"
+rsvg-convert -w 1156 -h 867 -o "$ROOTFS/tmp/trebo-assets/background.png" "$SCRIPT_DIR/assets/background.svg"
+rsvg-convert -w 507 -h 444 -o "$ROOTFS/tmp/trebo-assets/logo.png" "$SCRIPT_DIR/assets/logo.svg"
 
 cat > "$ROOTFS/tmp/trebo-customize.sh" <<'CHROOT_EOF'
 #!/usr/bin/env bash
@@ -198,6 +198,10 @@ for f in /usr/share/ubiquity/gtk/*.ui; do
 done
 
 update-initramfs -u -k all || true
+
+KVER="$(ls /lib/modules | sort -V | tail -n1)"
+mkinitramfs -o /tmp/trebo-live-initrd "$KVER"
+printf '%s\n' "$KVER" > /tmp/trebo-kernel-version
 
 rm -rf /tmp/trebo-assets /tmp/trebo-customize.sh
 CHROOT_EOF
