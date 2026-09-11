@@ -1,0 +1,66 @@
+name: Build Trebo ISO
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - build-trebo.sh
+      - assets/**
+      - .github/workflows/build-iso.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Check out Trebo
+        uses: actions/checkout@v4
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/.ghcup || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/share/swift || true
+          sudo docker image prune --all --force || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Install remaster tools
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xorriso squashfs-tools curl librsvg2-bin
+
+      - name: Build Trebo
+        shell: bash
+        run: |
+          sudo bash ./build-trebo.sh
+
+      - name: Verify output
+        shell: bash
+        run: |
+          sha256sum -c Trebo-20.04.6-amd64.iso.sha256
+          xorriso -indev Trebo-20.04.6-amd64.iso -report_el_torito plain
+          ls -lh Trebo-20.04.6-amd64.iso Trebo-20.04.6-amd64.iso.sha256
+
+      - name: Upload Trebo ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trebo-20.04.6-amd64
+          path: |
+            Trebo-20.04.6-amd64.iso
+            Trebo-20.04.6-amd64.iso.sha256
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
