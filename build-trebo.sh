@@ -239,6 +239,18 @@ fi
 cleanup_mounts
 trap - EXIT
 
+KVER="$(cat "$ROOTFS/tmp/trebo-kernel-version")"
+cp "$ROOTFS/tmp/trebo-live-initrd" "$ISO_DIR/casper/initrd"
+if [[ -f "$ROOTFS/boot/vmlinuz-$KVER" ]]; then
+  cp "$ROOTFS/boot/vmlinuz-$KVER" "$ISO_DIR/casper/vmlinuz"
+fi
+rm -f "$ROOTFS/tmp/trebo-live-initrd" "$ROOTFS/tmp/trebo-kernel-version"
+
+printf '%s\n' 'Trebo Linux 20.04.6 "Trebo" - Release amd64' > "$ISO_DIR/.disk/info"
+if [[ -f "$ISO_DIR/README.diskdefines" ]]; then
+  sed -i 's/Ubuntu/Trebo Linux/g; s/ubuntu/Trebo/g' "$ISO_DIR/README.diskdefines"
+fi
+
 for f in "$ISO_DIR/boot/grub/grub.cfg" "$ISO_DIR/isolinux/txt.cfg" "$ISO_DIR/isolinux/menu.cfg" "$ISO_DIR/isolinux/isolinux.cfg"; do
   [[ -f "$f" ]] || continue
   sed -i 's/Ubuntu/Trebo/g; s/ubuntu/Trebo/g' "$f"
