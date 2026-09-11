@@ -49,8 +49,16 @@ export LC_ALL=C
 apt-get update
 apt-get -y full-upgrade
 
+# The generic GNOME session and Tweaks live in Focal's universe component.
+apt-get install -y software-properties-common
+add-apt-repository -y universe
+apt-get update
+
 echo 'gdm3 shared/default-x-display-manager select gdm3' | debconf-set-selections
-apt-get install -y --no-install-recommends   gdm3 gnome-shell gnome-session gnome-control-center gnome-terminal nautilus   gnome-settings-daemon gnome-tweaks adwaita-icon-theme-full plymouth plymouth-themes
+apt-get install -y --no-install-recommends \
+  gdm3 gnome-shell gnome-session gnome-control-center gnome-terminal nautilus \
+  gnome-settings-daemon gnome-tweaks adwaita-icon-theme \
+  plymouth plymouth-theme-spinner plymouth-label
 
 mapfile -t purge_pkgs < <(
   dpkg-query -W -f='${binary:Package}
