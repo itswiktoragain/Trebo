@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: trebo-iso-build
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-24.04
