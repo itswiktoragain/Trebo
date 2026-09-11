@@ -11,7 +11,7 @@ ISO_DIR="$WORKDIR/iso"
 ROOTFS="$WORKDIR/rootfs"
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "Missing required command: $1" >&2; exit 1; }; }
-for c in curl sha256sum xorriso unsquashfs mksquashfs chroot mount umount sed awk grep find md5sum; do need_cmd "$c"; done
+for c in curl sha256sum xorriso unsquashfs mksquashfs chroot mount umount sed awk grep find md5sum rsvg-convert; do need_cmd "$c"; done
 
 if [[ ${EUID} -ne 0 ]]; then
   echo "Run this script as root (sudo ./build-trebo.sh)." >&2
