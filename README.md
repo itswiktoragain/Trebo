@@ -8,12 +8,16 @@ The package base remains Ubuntu Focal internally where changing package names, r
 
 ## Build
 
-On a Debian/Ubuntu host with enough free disk space:
+On a Debian/Ubuntu host with enough free disk space, install every required host-side build package first:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y xorriso squashfs-tools curl
-sudo ./build-trebo.sh
+sudo apt update && sudo apt install -y curl xorriso squashfs-tools librsvg2-bin coreutils util-linux sed gawk grep findutils
+```
+
+Then build Trebo:
+
+```bash
+sudo bash ./build-trebo.sh
 ```
 
 Output:
