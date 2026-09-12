@@ -146,6 +146,15 @@ rsvg-convert -w 96 -h 84 \
   -o "$ROOTFS/tmp/trebo-assets/trebo-installed.png" \
   "$ROOTFS/tmp/trebo-assets/trebo-installer-logo.svg"
 
+# GDM places the distribution logo on the greeter. Render a compact white
+# Trebo mark specifically for the dark login screen instead of inheriting
+# Ubuntu's /usr/share/plymouth/ubuntu-logo.png default.
+sed 's/currentColor/#ffffff/g' "$SCRIPT_DIR/assets/trebo-symbolic.svg" \
+  > "$ROOTFS/tmp/trebo-assets/trebo-login-logo.svg"
+rsvg-convert -w 96 -h 84 \
+  -o "$ROOTFS/tmp/trebo-assets/trebo-login-logo.png" \
+  "$ROOTFS/tmp/trebo-assets/trebo-login-logo.svg"
+
 cat > "$ROOTFS/tmp/trebo-customize.sh" <<'CHROOT_EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -382,6 +391,8 @@ extend-height=true
 show-show-apps-button=true
 show-apps-at-top=false
 dash-max-icon-size=48
+custom-theme-running-dots-color='#3584e4'
+custom-theme-running-dots-border-color='#3584e4'
 EOF_DCONF_PREFLIGHT
 
   dconf compile /tmp/trebo-dconf-preflight /tmp/trebo-dconf-preflight.d
@@ -1344,6 +1355,52 @@ fi
 rm -rf /usr/share/themes/Trebo
 ln -s Orchis-Grey /usr/share/themes/Trebo
 
+# ---------------------------------------------------------------------------
+# TREBO GDM / LOGIN-SCREEN BRANDING
+# ---------------------------------------------------------------------------
+install -Dm0644 /tmp/trebo-assets/trebo-login-logo.png \
+  /usr/share/pixmaps/trebo-login-logo.png
+install -Dm0644 /tmp/trebo-assets/trebo-login-logo.svg \
+  /usr/share/pixmaps/trebo-login-logo.svg
+
+# Ubuntu 24.04 sets org.gnome.login-screen::logo to an Ubuntu image. Give GDM
+# its own Trebo dconf database so the greeter never falls back to Ubuntu art.
+mkdir -p /etc/dconf/profile /etc/dconf/db/gdm.d
+cat > /etc/dconf/profile/gdm <<'EOF_TREBO_GDM_PROFILE'
+user-db:user
+system-db:gdm
+file-db:/usr/share/gdm/greeter-dconf-defaults
+EOF_TREBO_GDM_PROFILE
+
+cat > /etc/dconf/db/gdm.d/00-trebo <<'EOF_TREBO_GDM'
+[org/gnome/login-screen]
+logo='/usr/share/pixmaps/trebo-login-logo.png'
+
+[org/gnome/desktop/interface]
+icon-theme='Papirus-Trebo'
+cursor-theme='Bibata-Modern-Ice'
+color-scheme='default'
+
+[com/ubuntu/login-screen]
+background-picture-uri='file:///usr/share/backgrounds/trebo-background.png'
+background-color='#202020'
+background-size='cover'
+EOF_TREBO_GDM
+
+# Yaru is also Ubuntu's GDM shell theme and carries the orange Ubuntu visual
+# language. Prefer the stock GNOME GDM resource, whose supported default accent
+# is blue, while Trebo supplies its own wallpaper/logo through dconf.
+if [[ -f /usr/share/gnome-shell/gnome-shell-theme.gresource ]]; then
+  for gdm_alt in gdm3-theme.gresource gdm-theme.gresource; do
+    if update-alternatives --query "$gdm_alt" >/dev/null 2>&1 && \
+       update-alternatives --list "$gdm_alt" 2>/dev/null \
+         | grep -Fx /usr/share/gnome-shell/gnome-shell-theme.gresource >/dev/null; then
+      update-alternatives --set "$gdm_alt" \
+        /usr/share/gnome-shell/gnome-shell-theme.gresource
+    fi
+  done
+fi
+
 mkdir -p /etc/dconf/profile /etc/dconf/db/local.d
 
 cat > /etc/dconf/profile/user <<'EOF_DCONF_PROFILE'
@@ -1383,12 +1440,17 @@ extend-height=true
 show-show-apps-button=true
 show-apps-at-top=false
 dash-max-icon-size=48
+custom-theme-running-dots-color='#3584e4'
+custom-theme-running-dots-border-color='#3584e4'
 EOF_DCONF
 
 # Ubuntu ships lower-numbered schema overrides that default back to Yaru.
 # A 99_ Trebo override makes new live/installed accounts inherit Trebo's
 # theme and dock even before their personal dconf database exists.
 cat > /usr/share/glib-2.0/schemas/99_trebo.gschema.override <<'EOF_TREBO_SCHEMA'
+[org.gnome.login-screen]
+logo='/usr/share/pixmaps/trebo-login-logo.png'
+
 [org.gnome.desktop.interface]
 gtk-theme='Trebo'
 icon-theme='Papirus-Trebo'
@@ -1418,10 +1480,32 @@ extend-height=true
 show-show-apps-button=true
 show-apps-at-top=false
 dash-max-icon-size=48
+custom-theme-running-dots-color='#3584e4'
+custom-theme-running-dots-border-color='#3584e4'
 EOF_TREBO_SCHEMA
+
+# GNOME 46 (Noble) does not expose the newer accent-color preference, while
+# newer GNOME versions do. Add Trebo's blue accent only when the installed
+# schema actually supports the key, keeping Noble's strict schema compiler
+# happy and making future upgrades inherit the same visual identity.
+if gsettings list-keys org.gnome.desktop.interface 2>/dev/null \
+    | grep -Fx accent-color >/dev/null; then
+  sed -i "/color-scheme='default'/a accent-color='blue'" \
+    /usr/share/glib-2.0/schemas/99_trebo.gschema.override
+  cat >> /etc/dconf/db/gdm.d/00-trebo <<'EOF_TREBO_GDM_ACCENT'
+
+[org/gnome/desktop/interface]
+accent-color='blue'
+EOF_TREBO_GDM_ACCENT
+fi
 
 glib-compile-schemas --strict /usr/share/glib-2.0/schemas
 dconf update
+
+[[ -f /etc/dconf/db/gdm ]] || {
+  echo "Trebo GDM dconf database was not generated." >&2
+  exit 1
+}
 
 rm -f /etc/skel/.config/dconf/user /root/.config/dconf/user 2>/dev/null || true
 
@@ -2068,6 +2152,20 @@ grep -Fq "trebo-install-details" "$UBIQUITY_GTK" || {
 grep -Fq "Install Trebo Linux" "$UBIQUITY_UI" || {
   echo "Ubiquity main window title is not Trebo-branded." >&2
   exit 1
+}
+[[ -s /usr/share/pixmaps/trebo-login-logo.png ]] || {
+  echo "Trebo login-screen logo is missing." >&2
+  exit 1
+}
+grep -Fq "logo='/usr/share/pixmaps/trebo-login-logo.png'" \
+  /usr/share/glib-2.0/schemas/99_trebo.gschema.override || {
+    echo "Trebo login-screen logo override is missing." >&2
+    exit 1
+}
+grep -Fq "background-picture-uri='file:///usr/share/backgrounds/trebo-background.png'" \
+  /etc/dconf/db/gdm.d/00-trebo || {
+    echo "Trebo GDM background override is missing." >&2
+    exit 1
 }
 python3 -m py_compile /usr/lib/trebo/trebo-updater.py "$UBIQUITY_GTK"
 
