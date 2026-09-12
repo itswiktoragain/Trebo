@@ -1728,6 +1728,23 @@ method = r'''    def start_slideshow(self):
         if details is not None:
             details.set_name('trebo-install-details')
 
+        # The lower Ubiquity progress area is a separate GtkEventBox/Notebook
+        # from the slideshow page. If left unstyled it inherits the normal
+        # light GTK background and looks like a white border under Trebo's
+        # dark artwork. Give every container in that strip the same #202020
+        # background as the Trebo image so the two sections visually merge.
+        progress_widgets = {
+            'progress_eventbox': 'trebo-progress-eventbox',
+            'progress_section': 'trebo-progress-section',
+            'progress_mode': 'trebo-progress-notebook',
+            'installing_expander': 'trebo-progress-box',
+            'hbox12': 'trebo-progress-row',
+        }
+        for widget_id, css_name in progress_widgets.items():
+            widget = self.builder.get_object(widget_id)
+            if widget is not None:
+                widget.set_name(css_name)
+
         provider = Gtk.CssProvider()
         provider.load_from_data(b"""
 #trebo-install-panel {
@@ -1744,11 +1761,40 @@ method = r'''    def start_slideshow(self):
     color: rgba(255, 255, 255, 0.88);
     font-size: 16px;
 }
+
+/* Ubiquity's progress controls live below the artwork in their own widgets.
+ * Match the exact outer Trebo background color so there is no light border
+ * or visible seam between the picture and the lower progress area. */
+#trebo-progress-eventbox,
+#trebo-progress-section,
+#trebo-progress-notebook,
+#trebo-progress-notebook > stack,
+#trebo-progress-box,
+#trebo-progress-row {
+    background-color: #202020;
+    background-image: none;
+    border: 0;
+    box-shadow: none;
+}
+
+#trebo-install-details,
 #trebo-install-details > title,
 #trebo-install-details > title > arrow,
-#trebo-install-details > title label {
+#trebo-install-details > title label,
+#trebo-progress-row label {
     color: #ffffff;
+    background-color: transparent;
     -gtk-icon-shadow: none;
+}
+
+#trebo-install-details > title:hover,
+#trebo-install-details > title:focus {
+    background-color: rgba(255, 255, 255, 0.06);
+}
+
+#trebo-install-details scrolledwindow {
+    background-color: #202020;
+    border-color: #303030;
 }
 """)
         Gtk.StyleContext.add_provider_for_screen(
@@ -2327,6 +2373,14 @@ grep -Fq "GdkPixbuf.Pixbuf.new_from_file" "$UBIQUITY_GTK" || {
 }
 grep -Fq "trebo-install-details" "$UBIQUITY_GTK" || {
   echo "Trebo installer details-expander styling is missing." >&2
+  exit 1
+}
+grep -Fq "trebo-progress-eventbox" "$UBIQUITY_GTK" || {
+  echo "Trebo installer progress background styling is missing." >&2
+  exit 1
+}
+grep -Fq "background-color: #202020" "$UBIQUITY_GTK" || {
+  echo "Trebo installer progress area is not using the Trebo background color." >&2
   exit 1
 }
 [[ -f /usr/share/applications/trebo-updater.desktop ]] || {
