@@ -1856,58 +1856,58 @@ systemctl enable trebo-casper-noprompt.service >/dev/null 2>&1 || true
 # theme, the machine briefly shows Ubuntu and only switches to Trebo after the
 # real root filesystem mounts.
 KVER="$(cat /tmp/trebo-kernel-version)"
+REBUILD_LIVE_INITRD=1
 if [[ "${TREBO_QUICK:-0}" == "1" && "${TREBO_REFRESH_INITRD:-0}" != "1" ]]; then
-  echo "QUICK MODE: preserving existing Linux 7 kernel and initramfs."
+  REBUILD_LIVE_INITRD=0
+  echo "QUICK MODE: preserving the existing normal rootfs initrd and Casper ISO initrd."
   [[ -f "/boot/initrd.img-$KVER" ]] || {
-    echo "Quick mode cannot preserve a missing initramfs: /boot/initrd.img-$KVER" >&2
+    echo "Quick mode cannot preserve a missing rootfs initrd: /boot/initrd.img-$KVER" >&2
     exit 1
   }
-else
+fi
+
+if [[ "$REBUILD_LIVE_INITRD" == "1" ]]; then
   echo "Rebuilding Linux 7 LIVE initramfs with Casper + Trebo Plymouth..."
   rm -f "/boot/initrd.img-$KVER"
   BOOT=casper update-initramfs -c -k "$KVER"
-fi
 
-# Capture the complete listing ONCE, then inspect the file. Do not use
-# "lsinitramfs | grep -q" while pipefail is enabled: grep -q exits as soon as
-# it finds a match, which can SIGPIPE lsinitramfs and make a successful check
-# look like a failed pipeline.
-INITRD_LIST="$(mktemp)"
-if ! lsinitramfs "/boot/initrd.img-$KVER" > "$INITRD_LIST"; then
-  echo "Could not list Linux 7 initramfs contents." >&2
+  # Capture the complete listing ONCE, then inspect the file. Do not use
+  # "lsinitramfs | grep -q" while pipefail is enabled: grep -q exits as soon
+  # as it finds a match, which can SIGPIPE lsinitramfs.
+  INITRD_LIST="$(mktemp)"
+  if ! lsinitramfs "/boot/initrd.img-$KVER" > "$INITRD_LIST"; then
+    echo "Could not list Linux 7 live initramfs contents." >&2
+    rm -f "$INITRD_LIST"
+    exit 1
+  fi
+
+  if ! grep -Fx 'scripts/casper' "$INITRD_LIST" >/dev/null; then
+    echo "Linux 7 live initramfs is missing /scripts/casper." >&2
+    echo "Casper-related files that DID make it into the initramfs:" >&2
+    grep -i casper "$INITRD_LIST" >&2 || true
+    echo "Source Casper files in the rootfs:" >&2
+    find /usr/share/initramfs-tools -maxdepth 3 -iname '*casper*' -print >&2 || true
+    rm -f "$INITRD_LIST"
+    exit 1
+  fi
+
+  if ! grep -F 'usr/share/plymouth/themes/trebo/trebo.plymouth' "$INITRD_LIST" >/dev/null; then
+    echo "Linux 7 live initramfs does not contain the Trebo Plymouth theme." >&2
+    rm -f "$INITRD_LIST"
+    exit 1
+  fi
+
+  if ! grep -F 'usr/share/plymouth/themes/trebo/background.png' "$INITRD_LIST" >/dev/null; then
+    echo "Linux 7 live initramfs does not contain the Trebo Plymouth background." >&2
+    rm -f "$INITRD_LIST"
+    exit 1
+  fi
+
+  echo "Verified Linux 7 live initramfs contains Casper and Trebo Plymouth."
   rm -f "$INITRD_LIST"
-  exit 1
-fi
 
-if ! grep -Fx 'scripts/casper' "$INITRD_LIST" >/dev/null; then
-  echo "Linux 7 initramfs is missing /scripts/casper." >&2
-  echo "Casper-related files that DID make it into the initramfs:" >&2
-  grep -i casper "$INITRD_LIST" >&2 || true
-  echo "Source Casper files in the rootfs:" >&2
-  find /usr/share/initramfs-tools -maxdepth 3 -iname '*casper*' -print >&2 || true
-  rm -f "$INITRD_LIST"
-  exit 1
-fi
-
-if ! grep -F 'usr/share/plymouth/themes/trebo/trebo.plymouth' "$INITRD_LIST" >/dev/null; then
-  echo "Linux 7 initramfs does not contain the Trebo Plymouth theme." >&2
-  rm -f "$INITRD_LIST"
-  exit 1
-fi
-
-if ! grep -F 'usr/share/plymouth/themes/trebo/background.png' "$INITRD_LIST" >/dev/null; then
-  echo "Linux 7 initramfs does not contain the Trebo Plymouth background." >&2
-  rm -f "$INITRD_LIST"
-  exit 1
-fi
-
-echo "Verified Linux 7 initramfs contains Casper and Trebo Plymouth."
-rm -f "$INITRD_LIST"
-
-# Keep the Casper-enabled initrd OUTSIDE /boot before returning the rootfs to
-# normal installed-system semantics. The ISO needs Casper; an installed Trebo
-# must not inherit a live initrd as its normal /boot/initrd.img-*.
-if [[ "${TREBO_QUICK:-0}" != "1" || "${TREBO_REFRESH_INITRD:-0}" == "1" ]]; then
+  # Keep the Casper-enabled initrd OUTSIDE /boot before returning the rootfs
+  # to normal installed-system semantics.
   cp -f "/boot/initrd.img-$KVER" "/tmp/trebo-live-initrd-$KVER"
 fi
 
