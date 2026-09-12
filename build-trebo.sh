@@ -686,7 +686,8 @@ fi
 UBIQUITY_VERSION="$(dpkg-query -W -f='${Version}' ubiquity 2>/dev/null || true)"
 UBIQUITY_HEALTHY=0
 if [[ "$UBIQUITY_VERSION" == 24.04.* ]] && \
-   PYTHONPATH=/usr/lib/ubiquity python3 -c 'import ubiquity, ubiquity.frontend.gtk_ui' >/dev/null 2>&1; then
+   PYTHONPATH=/usr/lib/ubiquity python3 -c 'import ubiquity' >/dev/null 2>&1 && \
+   python3 -m py_compile /usr/lib/ubiquity/ubiquity/frontend/gtk_ui.py; then
   UBIQUITY_HEALTHY=1
 fi
 
@@ -725,11 +726,9 @@ case "$UBIQUITY_VERSION" in
     ;;
 esac
 
-PYTHONPATH=/usr/lib/ubiquity python3 - <<'PY_UBIQUITY_TEST'
-import ubiquity
-import ubiquity.frontend.gtk_ui
-print("Ubiquity GTK frontend import test passed.")
-PY_UBIQUITY_TEST
+PYTHONPATH=/usr/lib/ubiquity python3 -c 'import ubiquity'
+python3 -m py_compile /usr/lib/ubiquity/ubiquity/frontend/gtk_ui.py
+echo "Ubiquity GTK frontend validation passed without opening a display."
 
 # ---------------------------------------------------------------------------
 # LIVE-BOOT INTEGRITY
@@ -850,17 +849,41 @@ DOCK_APPICONS=/usr/share/gnome-shell/extensions/ubuntu-dock@ubuntu.com/appIcons.
 }
 python3 - "$DOCK_APPICONS" <<'PY_DOCK_ICON'
 from pathlib import Path
+import re
 import sys
 
 path = Path(sys.argv[1])
 text = path.read_text()
-needle = "this._iconActor.iconName = `view-app-grid-${Main.sessionMode.currentMode}-symbolic`;"
+
+trebo_path = "/usr/share/icons/hicolor/scalable/apps/trebo-symbolic.svg"
 replacement = """this._iconActor.iconName = null;
         this._iconActor.gicon = Gio.Icon.new_for_string('/usr/share/icons/hicolor/scalable/apps/trebo-symbolic.svg');"""
-if needle not in text:
-    raise SystemExit("Ubuntu Dock Show Apps icon assignment was not found")
-path.write_text(text.replace(needle, replacement, 1))
-print("Patched Ubuntu Dock Show Applications icon to Trebo.")
+
+# Quick mode is intentionally repeatable. If a previous run already patched
+# Ubuntu Dock, treat that as success instead of failing because the original
+# source line is gone.
+if trebo_path in text:
+    print("Ubuntu Dock Show Applications icon is already Trebo.")
+    raise SystemExit(0)
+
+patterns = [
+    r"this\._iconActor\.iconName\s*=\s*\`view-app-grid-\$\{Main\.sessionMode\.currentMode\}-symbolic\`;",
+    r"this\._iconActor\.icon_name\s*=\s*\`view-app-grid-\$\{Main\.sessionMode\.currentMode\}-symbolic\`;",
+    r"this\._iconActor\.iconName\s*=\s*['\"]view-app-grid-symbolic['\"];",
+    r"this\._iconActor\.icon_name\s*=\s*['\"]view-app-grid-symbolic['\"];",
+]
+
+for pattern in patterns:
+    text, count = re.subn(pattern, replacement, text, count=1)
+    if count:
+        path.write_text(text)
+        print("Patched Ubuntu Dock Show Applications icon to Trebo.")
+        break
+else:
+    # Do not brick a quick rebuild merely because Ubuntu changed this internal
+    # implementation. Papirus-Trebo also overrides the view-app-grid symbolic
+    # names, so the dock still has a supported theme-based fallback.
+    print("Ubuntu Dock source layout changed; using Papirus-Trebo app-grid icon fallback.")
 PY_DOCK_ICON
 
 find /usr/share/backgrounds -maxdepth 2 -type f   \( -iname '*ubuntu*' -o -iname '*focal*' \)   -delete 2>/dev/null || true
