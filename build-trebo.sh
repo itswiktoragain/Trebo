@@ -782,8 +782,10 @@ case "$UBIQUITY_VERSION" in
 esac
 
 PYTHONPATH=/usr/lib/ubiquity python3 -c 'import ubiquity'
-python3 -m py_compile /usr/lib/ubiquity/ubiquity/frontend/gtk_ui.py
-echo "Ubiquity GTK frontend validation passed without opening a display."
+python3 -m py_compile \
+  /usr/lib/ubiquity/ubiquity/frontend/gtk_ui.py \
+  /usr/lib/ubiquity/ubiquity/frontend/base.py
+echo "Ubiquity frontend validation passed without opening a display."
 
 # ---------------------------------------------------------------------------
 # LIVE-BOOT INTEGRITY
@@ -1892,16 +1894,125 @@ systemd-machine-id-setup --root="$TARGET" >/dev/null
 mkdir -p "$TARGET/var/lib/dbus"
 ln -sfn /etc/machine-id "$TARGET/var/lib/dbus/machine-id"
 
-# The live image's /boot/initrd is Casper-enabled. Rebuild target initrds after
-# removing the live-only configuration so installed Trebo boots normally.
-if [ -x "$TARGET/usr/sbin/update-initramfs" ]; then
-  chroot "$TARGET" /usr/sbin/update-initramfs -u -k all
-fi
-
+# Do NOT rebuild initramfs here. Ubiquity runs target-config hooks before its
+# remove_extras() phase, so casper can still be installed in /target at this
+# point. Trebo's post-install finalizer runs after plugininstall completes.
 rm -f "$TARGET/usr/lib/ubiquity/target-config/99trebo-installed"
 exit 0
 EOF_TREBO_TARGET
 chmod 0755 /usr/lib/ubiquity/target-config/99trebo-installed
+
+# Final installed-system cleanup. This runs from Ubiquity's success path,
+# AFTER plugininstall (and therefore after remove_extras()). It is the correct
+# point to guarantee that the target no longer has live-session boot state.
+cat > /usr/lib/ubiquity/trebo-finalize-target <<'EOF_TREBO_FINALIZE'
+#!/bin/sh
+set -eu
+
+TARGET=/target
+[ -d "$TARGET" ] || exit 0
+
+rm -f "$TARGET/etc/initramfs-tools/conf.d/trebo-live"
+rm -f "$TARGET/etc/systemd/system/trebo-casper-noprompt.service"
+rm -f "$TARGET/etc/systemd/system/multi-user.target.wants/trebo-casper-noprompt.service"
+
+if [ -f "$TARGET/etc/initramfs-tools/initramfs.conf" ]; then
+  if grep -q '^BOOT=' "$TARGET/etc/initramfs-tools/initramfs.conf"; then
+    sed -i 's/^BOOT=.*/BOOT=local/' "$TARGET/etc/initramfs-tools/initramfs.conf"
+  else
+    printf '\nBOOT=local\n' >> "$TARGET/etc/initramfs-tools/initramfs.conf"
+  fi
+fi
+
+# Ubiquity should remove casper through filesystem.manifest-remove. If that
+# cleanup was incomplete, remove exactly this one live-only package before the
+# final initramfs rebuild. Never use apt autoremove here.
+if chroot "$TARGET" dpkg-query -W -f='${db:Status-Status}' casper 2>/dev/null \
+    | grep -Fx installed >/dev/null; then
+  if chroot "$TARGET" dpkg --no-act --remove casper >/dev/null 2>&1; then
+    chroot "$TARGET" dpkg --remove casper
+  else
+    echo "Trebo installer: casper is still installed and cannot be safely removed." >&2
+    exit 1
+  fi
+fi
+
+# Reassert Trebo Plymouth after installer package operations.
+if [ -f "$TARGET/usr/share/plymouth/themes/trebo/trebo.plymouth" ]; then
+  chroot "$TARGET" update-alternatives --set default.plymouth \
+    /usr/share/plymouth/themes/trebo/trebo.plymouth >/dev/null 2>&1 || true
+
+  mkdir -p "$TARGET/etc/plymouth"
+  if [ -f "$TARGET/etc/plymouth/plymouthd.conf" ]; then
+    if grep -q '^Theme=' "$TARGET/etc/plymouth/plymouthd.conf"; then
+      sed -i 's/^Theme=.*/Theme=trebo/' "$TARGET/etc/plymouth/plymouthd.conf"
+    else
+      printf '\nTheme=trebo\n' >> "$TARGET/etc/plymouth/plymouthd.conf"
+    fi
+  else
+    printf '[Daemon]\nTheme=trebo\nShowDelay=0\n' > "$TARGET/etc/plymouth/plymouthd.conf"
+  fi
+fi
+
+# One final installed-system initramfs after casper removal. This is the initrd
+# the newly installed machine will actually boot.
+if [ -x "$TARGET/usr/sbin/update-initramfs" ]; then
+  chroot "$TARGET" /usr/sbin/update-initramfs -u -k all
+fi
+
+# Rebuild GRUB after Trebo's quiet+splash/default-theme fixes.
+if [ -x "$TARGET/usr/sbin/update-grub" ]; then
+  chroot "$TARGET" /usr/sbin/update-grub
+fi
+
+rm -f "$TARGET/usr/lib/ubiquity/trebo-finalize-target"
+exit 0
+EOF_TREBO_FINALIZE
+chmod 0755 /usr/lib/ubiquity/trebo-finalize-target
+
+# Ubiquity's target-config hook runs too early for the final initramfs repair.
+# Patch the generic success callback instead: all GTK installer success paths
+# reach this only after plugininstall has completed.
+UBIQUITY_BASE=/usr/lib/ubiquity/ubiquity/frontend/base.py
+[[ -f "$UBIQUITY_BASE" ]] || {
+  echo "Ubiquity base frontend is missing: $UBIQUITY_BASE" >&2
+  exit 1
+}
+python3 - "$UBIQUITY_BASE" <<'PY_TREBO_SUCCESS_FINALIZER'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+
+needle = """    def run_success_cmd(self):
+        if self.success_cmd != '':
+            self.debconf_progress_info(
+                self.get_string('ubiquity/install/success_command'))
+            execute_root('sh', '-c', self.success_cmd)
+"""
+
+replacement = """    def run_success_cmd(self):
+        if self.success_cmd != '':
+            self.debconf_progress_info(
+                self.get_string('ubiquity/install/success_command'))
+            execute_root('sh', '-c', self.success_cmd)
+
+        # Trebo: plugininstall has now finished, including remove_extras().
+        # Rebuild the installed target's initramfs only at this late point.
+        finalizer = '/usr/lib/ubiquity/trebo-finalize-target'
+        if os.path.exists(finalizer):
+            execute_root(finalizer)
+"""
+
+if "trebo-finalize-target" in text:
+    print("Trebo Ubiquity success finalizer is already patched.")
+elif needle in text:
+    path.write_text(text.replace(needle, replacement, 1))
+    print("Patched Ubiquity success callback with Trebo target finalizer.")
+else:
+    raise SystemExit("Could not locate Ubiquity run_success_cmd()")
+PY_TREBO_SUCCESS_FINALIZER
 
 # Trebo Plymouth theme for the installed OS.
 THEME=/usr/share/plymouth/themes/trebo
@@ -2189,14 +2300,13 @@ if [[ "${TREBO_QUICK:-0}" != "1" || "${TREBO_REFRESH_INITRD:-0}" == "1" ]]; then
     exit 1
   }
 
-  if grep -Fxq 'scripts/casper' "$NORMAL_INITRD_LIST"; then
-    echo "Normal installed-system initramfs unexpectedly still contains Casper." >&2
-    rm -f "$NORMAL_INITRD_LIST"
-    exit 1
-  fi
-
+  # Casper is intentionally installed in the LIVE rootfs, so initramfs-tools
+  # may include its scripts even when BOOT=local. Presence of scripts/casper
+  # here is not evidence that an installed machine will boot as a live system.
+  # Ubiquity removes casper from /target and Trebo performs a final post-install
+  # initramfs rebuild after package cleanup.
   rm -f "$NORMAL_INITRD_LIST"
-  echo "Verified normal Linux 7 initramfs contains Trebo Plymouth and no Casper."
+  echo "Verified normal Linux 7 initramfs contains Trebo Plymouth in BOOT=local mode."
 fi
 
 echo "Final Trebo Linux kernel: $KVER"
@@ -2303,6 +2413,14 @@ if [[ "${TREBO_QUICK:-0}" != "1" || "${TREBO_REFRESH_INITRD:-0}" == "1" ]]; then
 fi
 [[ -x /usr/lib/ubiquity/target-config/99trebo-installed ]] || {
   echo "Trebo Ubiquity installed-system cleanup hook is missing." >&2
+  exit 1
+}
+[[ -x /usr/lib/ubiquity/trebo-finalize-target ]] || {
+  echo "Trebo post-install target finalizer is missing." >&2
+  exit 1
+}
+grep -Fq "trebo-finalize-target" /usr/lib/ubiquity/ubiquity/frontend/base.py || {
+  echo "Ubiquity success path is not wired to Trebo's target finalizer." >&2
   exit 1
 }
 [[ "$(dpkg-divert --listpackage /usr/bin/update-manager 2>/dev/null || true)" == "LOCAL" ]] || {
