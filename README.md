@@ -1,10 +1,10 @@
 # Trebo Linux
 
-Trebo is a remastered Ubuntu 20.04.6 desktop image with a plain GNOME desktop and Trebo branding.
+Trebo starts from the Ubuntu 20.04.6 desktop image, installs a Linux 7.x mainline kernel first, then moves the userspace through Jammy to Noble before applying the Trebo GNOME desktop and branding.
 
-The build downloads the official Ubuntu 20.04.6 AMD64 desktop ISO, verifies its official SHA-256, fully upgrades the live filesystem, installs the GNOME desktop components, removes the most visible Ubuntu desktop/branding packages, replaces user-facing release identity with Trebo Linux, installs the supplied Trebo background and logo, replaces the Ubiquity slideshow, adds a custom Plymouth startup/shutdown/media-removal screen, rebuilds the SquashFS, and recreates a hybrid BIOS/UEFI bootable ISO.
+The build downloads the official Ubuntu 20.04.6 AMD64 desktop ISO and verifies its SHA-256. While the rootfs is still Focal, it discovers and installs the newest stable Ubuntu Mainline Linux 7.x generic kernel. Only after Linux 7 is installed does it move APT through Jammy and then Noble, reassert GNOME, rebuild and validate the Linux 7 Casper initramfs, apply Trebo branding, rebuild the SquashFS, and recreate a hybrid BIOS/UEFI bootable ISO.
 
-The package base remains Ubuntu Focal internally where changing package names, repository URLs, or package provenance would break updates and dependencies. User-facing OS branding is changed to Trebo.
+The final userspace uses Noble repositories. Ubiquity and Casper are deliberately retained from the original installer stack because Trebo requires Ubiquity. The script never runs apt remove, apt purge, or apt autoremove; release transitions are simulated first and are aborted if APT wants to remove critical boot, desktop, or installer packages.
 
 ## Build
 
