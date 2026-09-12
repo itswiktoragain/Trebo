@@ -100,6 +100,12 @@ jobs:
           grep -Fq 'trebo-install-details' ./build-trebo.sh
           grep -Fq 'Theme=trebo' ./build-trebo.sh
           grep -Fq 'quiet", "splash' ./build-trebo.sh
+          grep -Fq 'Installed freshly rebuilt Trebo Casper initrd into ISO/casper/initrd.' ./build-trebo.sh
+
+          if grep -Fq 'preserving the existing validated Casper ISO initrd' ./build-trebo.sh; then
+            echo "Refusing to build: quick mode is allowed to reuse a stale Casper initrd."
+            exit 1
+          fi
 
       - name: Build Trebo
         shell: bash
