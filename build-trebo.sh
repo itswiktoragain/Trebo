@@ -339,7 +339,10 @@ echo "Linux 7 installed first: $KVER"
 # Trebo explicitly requires Ubiquity, so these packages are protected.
 apt-get install -y --no-install-recommends \
   ubiquity ubiquity-frontend-gtk casper
-apt-mark hold ubiquity ubiquity-frontend-gtk casper || true
+# Ubiquity must stay on the legacy installer stack. Casper, however, should
+# follow the userspace forward so the live-boot scripts match modern
+# initramfs-tools.
+apt-mark hold ubiquity ubiquity-frontend-gtk || true
 
 # ---------------------------------------------------------------------------
 # PHASE 2: MODERNIZE THE USERSpace REPOSITORIES
@@ -440,6 +443,54 @@ else
     exit 1
   }
 fi
+
+# ---------------------------------------------------------------------------
+# LIVE-BOOT INTEGRITY
+# ---------------------------------------------------------------------------
+# The rootfs is now Noble-based (or a resumed Noble work tree). Refresh Casper
+# from the final repositories so its initramfs scripts match the final
+# initramfs-tools version. This is intentionally done AFTER the kernel-first
+# stage and the release transitions.
+apt-mark unhold casper 2>/dev/null || true
+apt-get update
+
+casper_simulation="$(mktemp)"
+apt-get -s install casper > "$casper_simulation"
+for critical in ubiquity ubiquity-frontend-gtk systemd initramfs-tools gdm3 gnome-shell; do
+  if awk '$1 == "Remv" {print $2}' "$casper_simulation" | grep -qx "$critical"; then
+    echo "Refusing Casper refresh because apt wants to remove critical package: $critical" >&2
+    cat "$casper_simulation" >&2
+    rm -f "$casper_simulation"
+    exit 1
+  fi
+done
+rm -f "$casper_simulation"
+
+apt-get install -y --no-install-recommends casper
+
+# initramfs-tools dispatches the root-mount script through /scripts/$BOOT.
+# Without BOOT=casper, a freshly generated initrd can be perfectly valid for
+# an installed system while being useless as an Ubuntu/Trebo live ISO.
+mkdir -p /etc/initramfs-tools/conf.d
+cat > /etc/initramfs-tools/conf.d/trebo-live <<'EOF_TREBO_LIVE'
+BOOT=casper
+MODULES=most
+FRAMEBUFFER=y
+EOF_TREBO_LIVE
+
+# Fail before spending time rebuilding the initramfs if the Casper package is
+# incomplete or incompatible with the final userspace.
+[[ -f /usr/share/initramfs-tools/scripts/casper ]] || {
+  echo "Casper root-mount script is missing from the rootfs." >&2
+  dpkg -L casper >&2 || true
+  exit 1
+}
+[[ -f /usr/share/initramfs-tools/hooks/casper ]] || {
+  echo "Casper initramfs hook is missing from the rootfs." >&2
+  dpkg -L casper >&2 || true
+  exit 1
+}
+chmod +x /usr/share/initramfs-tools/scripts/casper /usr/share/initramfs-tools/hooks/casper
 
 # Rebrand the final Noble-based userspace as Trebo.
 cat > /usr/lib/os-release <<'EOF_OS_RELEASE'
@@ -637,13 +688,19 @@ fi
 # theme, the machine briefly shows Ubuntu and only switches to Trebo after the
 # real root filesystem mounts.
 KVER="$(cat /tmp/trebo-kernel-version)"
-echo "Rebuilding Linux 7 initramfs with Trebo Plymouth embedded..."
-update-initramfs -u -k "$KVER"
+echo "Rebuilding Linux 7 LIVE initramfs with Casper + Trebo Plymouth..."
+rm -f "/boot/initrd.img-$KVER"
+BOOT=casper update-initramfs -c -k "$KVER"
 
-# Refuse to publish an ISO unless the live initramfs has both Casper and the
-# Trebo Plymouth assets. This catches the exact Ubuntu-then-Trebo regression.
-if ! lsinitramfs "/boot/initrd.img-$KVER" | grep -qE '(^|/)scripts/casper(/|$)'; then
-  echo "Linux 7 initramfs does not contain Casper; refusing to create a broken ISO." >&2
+# Refuse to publish an ISO unless the initrd contains the actual Casper root
+# script. Also print every Casper-related initrd entry on failure so this can
+# never again collapse to a useless one-line error.
+if ! lsinitramfs "/boot/initrd.img-$KVER" | grep -qx 'scripts/casper'; then
+  echo "Linux 7 initramfs is missing /scripts/casper." >&2
+  echo "Casper-related files that DID make it into the initramfs:" >&2
+  lsinitramfs "/boot/initrd.img-$KVER" | grep -i casper >&2 || true
+  echo "Source Casper files in the rootfs:" >&2
+  find /usr/share/initramfs-tools -maxdepth 3 -iname '*casper*' -print >&2 || true
   exit 1
 fi
 
