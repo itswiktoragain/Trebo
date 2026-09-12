@@ -231,6 +231,9 @@ install_customization_packages() {
     plymouth-label
     plymouth-theme-spinner
     gnome-shell-extension-ubuntu-dock
+    gnome-shell-extension-appindicator
+    gnome-shell-extension-desktop-icons-ng
+    gnome-shell-extension-ubuntu-tiling-assistant
     papirus-icon-theme
     bibata-cursor-theme
     orchis-gtk-theme
@@ -827,6 +830,23 @@ EOF_LSB
 printf 'Trebo Linux 1.0 \\n \\l\n' > /etc/issue
 printf 'Trebo Linux 1.0\n' > /etc/issue.net
 
+# Brand the Casper live session itself. The installed machine's hostname is
+# still chosen by Ubiquity and written into /target during installation.
+cat > /etc/casper.conf <<'EOF_TREBO_CASPER'
+export USERNAME="trebo"
+export USERFULLNAME="Trebo Live User"
+export HOST="trebo"
+export BUILD_SYSTEM="Ubuntu"
+export FLAVOUR="trebo"
+EOF_TREBO_CASPER
+
+printf 'trebo\n' > /etc/hostname
+if grep -qE '^127\.0\.1\.1[[:space:]]' /etc/hosts; then
+  sed -i -E 's/^127\.0\.1\.1[[:space:]].*/127.0.1.1 trebo/' /etc/hosts
+else
+  printf '127.0.1.1 trebo\n' >> /etc/hosts
+fi
+
 # Keep Noble's Ubuntu GNOME session machinery because it wires the supported
 # dock/portal/session pieces together. Rebrand only the chooser-visible names.
 for session_file in \
@@ -925,18 +945,23 @@ cat > /usr/lib/trebo/trebo-updater-helper <<'EOF_TREBO_UPDATE_HELPER'
 set -eu
 
 action="${1:-}"
+APT_LOCK="-o DPkg::Lock::Timeout=120"
 
 case "$action" in
   check)
-    apt-get update -qq
+    apt-get $APT_LOCK update -qq
     apt list --upgradable 2>/dev/null || true
     ;;
   install)
-    apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get -y --no-remove upgrade
-    apt-get check
+    apt-get $APT_LOCK update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get $APT_LOCK -y --no-remove upgrade
+    dpkg --audit
+    apt-get $APT_LOCK check
     printf '\nTREBO_REMAINING_UPDATES\n'
     apt list --upgradable 2>/dev/null || true
+    if [ -e /run/reboot-required ]; then
+      printf '\nTREBO_RESTART_REQUIRED\n'
+    fi
     ;;
   *)
     echo "Usage: trebo-updater-helper {check|install}" >&2
@@ -1050,7 +1075,14 @@ class TreboUpdater(Gtk.Window):
                         message = "Trebo is up to date."
                         body = "No package updates are available."
                 else:
-                    message = "Update operation finished."
+                    restart_required = "TREBO_RESTART_REQUIRED" in output
+                    output = output.replace("TREBO_RESTART_REQUIRED", "")
+                    output = output.replace("TREBO_REMAINING_UPDATES", "\nRemaining updates:")
+                    message = (
+                        "Updates installed. Restart required."
+                        if restart_required
+                        else "Updates installed successfully."
+                    )
                     body = output
             elif proc.returncode == 126:
                 message = "Update cancelled."
@@ -1092,10 +1124,46 @@ Keywords=update;upgrade;software;packages;
 StartupNotify=true
 EOF_TREBO_UPDATER_DESKTOP
 
-# Replace Ubuntu's visible Software Updater launcher with Trebo Updater while
-# retaining the package underneath because ubuntu-desktop-minimal depends on it.
-if [[ -f /usr/share/applications/update-manager.desktop ]]; then
-  cp /usr/share/applications/trebo-updater.desktop /usr/share/applications/update-manager.desktop
+# Keep update-manager installed because ubuntu-desktop-minimal depends on it,
+# but divert its user-facing binary and desktop file. dpkg-divert makes this
+# survive future update-manager package upgrades instead of being overwritten.
+ensure_local_diversion() {
+  local path="$1"
+  local diverted="$2"
+  local owner
+
+  owner="$(dpkg-divert --listpackage "$path" 2>/dev/null || true)"
+  case "$owner" in
+    LOCAL)
+      ;;
+    "")
+      if [[ -e "$diverted" || -L "$diverted" ]]; then
+        echo "Cannot create diversion: $diverted already exists but $path is not diverted." >&2
+        return 1
+      fi
+      dpkg-divert --quiet --local --rename --add --divert "$diverted" "$path"
+      ;;
+    *)
+      echo "Refusing to replace existing non-local diversion for $path (owner: $owner)." >&2
+      return 1
+      ;;
+  esac
+}
+
+ensure_local_diversion /usr/bin/update-manager /usr/bin/update-manager.ubuntu
+cat > /usr/bin/update-manager <<'EOF_TREBO_UPDATE_WRAPPER'
+#!/bin/sh
+exec /usr/lib/trebo/trebo-updater.py "$@"
+EOF_TREBO_UPDATE_WRAPPER
+chmod 0755 /usr/bin/update-manager
+
+if [[ -e /usr/share/applications/update-manager.desktop || \
+      -e /usr/share/applications/update-manager.desktop.ubuntu ]]; then
+  ensure_local_diversion \
+    /usr/share/applications/update-manager.desktop \
+    /usr/share/applications/update-manager.desktop.ubuntu
+  install -m0644 /usr/share/applications/trebo-updater.desktop \
+    /usr/share/applications/update-manager.desktop
 fi
 
 # Disable Ubuntu's automatic Update Notifier so it cannot reopen Update Manager.
@@ -1399,6 +1467,11 @@ def prop(obj, name, value):
     node = ET.SubElement(obj, "property", {"name": name})
     node.text = value
 
+live = root.find(".//object[@id='live_installer']")
+if live is None:
+    raise SystemExit("Ubiquity live_installer window was not found")
+prop(live, "title", "Install Trebo Linux")
+
 finished = root.find(".//object[@id='finished_dialog']")
 if finished is None:
     raise SystemExit("Ubiquity finished_dialog was not found")
@@ -1497,9 +1570,10 @@ body {
 </html>
 EOF_SLIDE
 
-# Ubiquity normally drives the slideshow through file:// + JS + directory.jsonp.
-# Load Trebo's static HTML directly with WebKit.load_html() instead. This avoids
-# the blank-white slideshow failure while preserving Ubiquity's progress bar.
+# Replace start_slideshow() as one complete method instead of repeatedly
+# editing individual lines. This repairs old trebo-work trees where an earlier
+# build deleted the slideshow runtime, and removes all locale/JSONP/JS
+# dependencies from the installation progress page.
 python3 - "$UBIQUITY_GTK" <<'PY_TREBO_SLIDESHOW'
 from pathlib import Path
 import sys
@@ -1507,23 +1581,65 @@ import sys
 path = Path(sys.argv[1])
 text = path.read_text()
 
-if "trebo.html" in text and "webview.load_html" in text:
-    print("Trebo installer progress screen is already patched.")
-    raise SystemExit(0)
+start_marker = "    def start_slideshow(self):\n"
+end_marker = "    def customize_installer(self):\n"
+start = text.find(start_marker)
+end = text.find(end_marker, start + len(start_marker))
+if start < 0 or end < 0:
+    raise SystemExit("Could not locate Ubiquity start_slideshow() method boundaries")
 
-needle = "        webview.load_uri(slides)"
-replacement = """        with open('/usr/share/ubiquity-slideshow/slides/trebo.html', 'r', encoding='utf-8') as trebo_slide:
-            trebo_html = trebo_slide.read()
-        webview.load_html(
-            trebo_html,
-            'file:///usr/share/ubiquity-slideshow/slides/',
-        )"""
+method = r'''    def start_slideshow(self):
+        # Trebo uses one deterministic local progress page. Keeping this
+        # independent of directory.jsonp, translated slideshow directories and
+        # slideshow JavaScript avoids the blank-white WebKit failure seen after
+        # repeated remaster/quick-build iterations.
+        misc.drop_privileges_save()
+        self.progress_mode.set_current_page(
+            self.progress_pages['progress_bar'])
+        telemetry.get().add_stage('user_done')
 
-if needle not in text:
-    raise SystemExit("Could not find Ubiquity's slideshow load_uri call")
+        if not self.slideshow:
+            self.page_mode.hide()
+            misc.regain_privileges_save()
+            return
 
-path.write_text(text.replace(needle, replacement, 1))
-print("Patched Ubiquity to load the Trebo installer progress screen directly.")
+        self.page_section.hide()
+
+        gi.require_version('WebKit2', '4.1')
+        from gi.repository import WebKit2
+
+        context = WebKit2.WebContext.get_default()
+        context.set_cache_model(WebKit2.CacheModel.DOCUMENT_VIEWER)
+        webview = WebKit2.WebView()
+
+        settings = webview.get_settings()
+        settings.set_property('allow-file-access-from-file-urls', True)
+        webview.connect('context-menu', self.on_context_menu)
+        if os.environ.get('UBIQUITY_A11Y_PROFILE') == 'screen-reader':
+            settings.set_property('enable-caret-browsing', True)
+
+        webview.connect('decide-policy', self.on_slideshow_link_clicked)
+        webview.show()
+        self.page_mode.insert_page(webview, None, 1)
+        webview.load_uri(
+            'file:///usr/share/ubiquity-slideshow/slides/trebo.html')
+        self.page_mode.show()
+        self.page_mode.set_current_page(1)
+        webview.grab_focus()
+        misc.regain_privileges_save()
+
+'''
+
+text = text[:start] + method + text[end:]
+
+# The stock code later overwrites GtkBuilder's icon with "ubiquity".
+text = text.replace(
+    "self.live_installer.set_icon_name('ubiquity')",
+    "self.live_installer.set_icon_name('trebo-installer-symbolic')",
+)
+
+path.write_text(text)
+print("Installed deterministic Trebo Ubiquity progress-screen method.")
 PY_TREBO_SLIDESHOW
 
 # Replace only Ubiquity's small logo with a correctly sized dark Trebo mark.
@@ -1822,12 +1938,51 @@ for pkg in \
   wireplumber \
   xdg-desktop-portal-gnome \
   gnome-shell-extension-ubuntu-dock \
+  gnome-shell-extension-appindicator \
+  gnome-shell-extension-desktop-icons-ng \
+  gnome-shell-extension-ubuntu-tiling-assistant \
   papirus-icon-theme \
   bibata-cursor-theme \
   orchis-gtk-theme
 do
   [[ "$(dpkg-query -W -f='${db:Status-Status}' "$pkg" 2>/dev/null || true)" == "installed" ]] || {
     echo "Required final Trebo package is not fully installed: $pkg" >&2
+    exit 1
+  }
+done
+
+# Catch branding/session/updater/live-vs-installed regressions before the
+# expensive SquashFS stage.
+[[ ! -e /etc/initramfs-tools/conf.d/trebo-live ]] || {
+  echo "Live-only initramfs config leaked into the reusable rootfs." >&2
+  exit 1
+}
+[[ -x /usr/lib/ubiquity/target-config/99trebo-installed ]] || {
+  echo "Trebo Ubiquity installed-system cleanup hook is missing." >&2
+  exit 1
+}
+[[ "$(dpkg-divert --listpackage /usr/bin/update-manager 2>/dev/null || true)" == "LOCAL" ]] || {
+  echo "Trebo Updater diversion for /usr/bin/update-manager is missing." >&2
+  exit 1
+}
+grep -Fq "file:///usr/share/ubiquity-slideshow/slides/trebo.html" "$UBIQUITY_GTK" || {
+  echo "Ubiquity is not wired to Trebo's static progress screen." >&2
+  exit 1
+}
+grep -Fq "Install Trebo Linux" "$UBIQUITY_UI" || {
+  echo "Ubiquity main window title is not Trebo-branded." >&2
+  exit 1
+}
+python3 -m py_compile /usr/lib/trebo/trebo-updater.py "$UBIQUITY_GTK"
+
+for ext in \
+  ubuntu-dock@ubuntu.com \
+  ubuntu-appindicators@ubuntu.com \
+  ding@rastersoft.com \
+  tiling-assistant@ubuntu.com
+do
+  [[ -d "/usr/share/gnome-shell/extensions/$ext" ]] || {
+    echo "Required GNOME Shell extension directory is missing: $ext" >&2
     exit 1
   }
 done
