@@ -210,7 +210,7 @@ for deb in "${kernel_debs[@]}"; do
   if (( ${#maint_scripts[@]} > 0 )); then
     # Some packages (for example modules) may not contain the broken pattern,
     # so patch per-package without requiring every package to match.
-    before="$(grep -hEc '/etc/kernel/[^ ]+\.d[[:space:]]+/usr/share/kernel/[^ ]+\.d' "${maint_scripts[@]}" || true)"
+    before="$(grep -hE '/etc/kernel/[^ ]+\.d[[:space:]]+/usr/share/kernel/[^ ]+\.d' "${maint_scripts[@]}" 2>/dev/null | wc -l)"
     if (( before > 0 )); then
       /tmp/trebo-kernel7/fix-run-parts.py "${maint_scripts[@]}"
       patched_calls=$((patched_calls + before))
