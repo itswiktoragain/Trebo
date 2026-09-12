@@ -54,8 +54,12 @@ jobs:
             echo "Refusing to build: package-removal command found in remaster script."
             exit 1
           fi
-          if grep -nE 'mkinitramfs[[:space:]].*casper|cp[[:space:]].*trebo-live-initrd' ./build-trebo.sh; then
-            echo "Refusing to build: live/casper initramfs replacement found."
+          if ! grep -q 'lsinitramfs "/boot/initrd.img-$KVER".*scripts/casper' ./build-trebo.sh; then
+            echo "Refusing to build: Linux 7 live initrd is not Casper-validated."
+            exit 1
+          fi
+          if ! grep -q 'cp "$ROOTFS/boot/vmlinuz-$KVER" "$ISO_DIR/casper/vmlinuz"' ./build-trebo.sh; then
+            echo "Refusing to build: ISO is not wired to boot Linux 7."
             exit 1
           fi
 
