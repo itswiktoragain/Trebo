@@ -1891,11 +1891,6 @@ if [ -f "$TARGET/usr/share/plymouth/themes/trebo/trebo.plymouth" ]; then
     chroot "$TARGET" update-alternatives --set text.plymouth \
       /usr/share/plymouth/themes/trebo-text/trebo-text.plymouth >/dev/null 2>&1 || true
   fi
-
-  if [ -f "$TARGET/usr/share/plymouth/themes/trebo-text/trebo-text.plymouth" ]; then
-    chroot "$TARGET" update-alternatives --set text.plymouth \
-      /usr/share/plymouth/themes/trebo-text/trebo-text.plymouth >/dev/null 2>&1 || true
-  fi
   mkdir -p "$TARGET/etc/plymouth"
   if [ -f "$TARGET/etc/plymouth/plymouthd.conf" ]; then
     if grep -q '^Theme=' "$TARGET/etc/plymouth/plymouthd.conf"; then
@@ -2009,6 +2004,11 @@ fi
 if [ -f "$TARGET/usr/share/plymouth/themes/trebo/trebo.plymouth" ]; then
   chroot "$TARGET" update-alternatives --set default.plymouth \
     /usr/share/plymouth/themes/trebo/trebo.plymouth >/dev/null 2>&1 || true
+
+  if [ -f "$TARGET/usr/share/plymouth/themes/trebo-text/trebo-text.plymouth" ]; then
+    chroot "$TARGET" update-alternatives --set text.plymouth \
+      /usr/share/plymouth/themes/trebo-text/trebo-text.plymouth >/dev/null 2>&1 || true
+  fi
 
   mkdir -p "$TARGET/etc/plymouth"
   if [ -f "$TARGET/etc/plymouth/plymouthd.conf" ]; then
