@@ -70,6 +70,9 @@ sed 's/currentColor/#202020/g' "$SCRIPT_DIR/assets/trebo-symbolic.svg" \
 rsvg-convert -w 64 -h 56 \
   -o "$ROOTFS/tmp/trebo-assets/trebo-installer-logo.png" \
   "$ROOTFS/tmp/trebo-assets/trebo-installer-logo.svg"
+rsvg-convert -w 96 -h 84 \
+  -o "$ROOTFS/tmp/trebo-assets/trebo-installed.png" \
+  "$ROOTFS/tmp/trebo-assets/trebo-installer-logo.svg"
 
 cat > "$ROOTFS/tmp/trebo-customize.sh" <<'CHROOT_EOF'
 #!/usr/bin/env bash
@@ -851,6 +854,18 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
   [[ -d /usr/share/icons/Papirus ]] && gtk-update-icon-cache -f /usr/share/icons/Papirus || true
 fi
 
+# Trebo GTK theme: use the Noble-packaged Orchis-Grey implementation (including
+# its GTK4 assets), but publish it under Trebo's own theme name.
+[[ -d /usr/share/themes/Orchis-Grey ]] || {
+  echo "Orchis-Grey GTK theme is missing." >&2
+  exit 1
+}
+rm -rf /usr/share/themes/Trebo
+cp -a /usr/share/themes/Orchis-Grey /usr/share/themes/Trebo
+if [[ -f /usr/share/themes/Trebo/index.theme ]]; then
+  sed -i -E 's/^(Name=).*/\1Trebo/' /usr/share/themes/Trebo/index.theme || true
+fi
+
 mkdir -p /etc/dconf/profile /etc/dconf/db/local.d
 
 cat > /etc/dconf/profile/user <<'EOF_DCONF_PROFILE'
@@ -869,7 +884,7 @@ picture-uri='file:///usr/share/backgrounds/trebo-background.png'
 picture-options='stretched'
 
 [org/gnome/desktop/interface]
-gtk-theme='Orchis-Grey'
+gtk-theme='Trebo'
 icon-theme='Papirus-Trebo'
 cursor-theme='Bibata-Modern-Ice'
 color-scheme='default'
@@ -897,12 +912,22 @@ EOF_DCONF
 # theme and dock even before their personal dconf database exists.
 cat > /usr/share/glib-2.0/schemas/99_trebo.gschema.override <<'EOF_TREBO_SCHEMA'
 [org.gnome.desktop.interface]
-gtk-theme='Orchis-Grey'
+gtk-theme='Trebo'
 icon-theme='Papirus-Trebo'
 cursor-theme='Bibata-Modern-Ice'
 color-scheme='default'
 
 [org.gnome.shell]
+disable-user-extensions=false
+enabled-extensions=['ubuntu-dock@ubuntu.com']
+
+[org.gnome.desktop.interface:ubuntu]
+gtk-theme='Trebo'
+icon-theme='Papirus-Trebo'
+cursor-theme='Bibata-Modern-Ice'
+color-scheme='default'
+
+[org.gnome.shell:ubuntu]
 disable-user-extensions=false
 enabled-extensions=['ubuntu-dock@ubuntu.com']
 
@@ -988,9 +1013,10 @@ if [[ -e /usr/share/ubiquity/pixmaps/ubuntu-logo.png ]]; then
   install -m0644 /tmp/trebo-assets/trebo-installer-logo.png \
     /usr/share/ubiquity/pixmaps/ubuntu-logo.png
 fi
-
-# The slideshow is fully replaced above, so do not overwrite
-# ubuntu_installed.png with an unrelated oversized image.
+if [[ -e /usr/share/ubiquity/pixmaps/ubuntu_installed.png ]]; then
+  install -m0644 /tmp/trebo-assets/trebo-installed.png \
+    /usr/share/ubiquity/pixmaps/ubuntu_installed.png
+fi
 
 # Replace obvious user-facing Ubuntu text in Ubiquity UI definitions.
 for ui_file in /usr/share/ubiquity/gtk/*.ui; do
@@ -1125,6 +1151,10 @@ rm -rf /var/crash/* 2>/dev/null || true
 dpkg --configure -a
 apt-get -f install -y
 apt-get check
+ldconfig
+update-desktop-database /usr/share/applications 2>/dev/null || true
+update-mime-database /usr/share/mime 2>/dev/null || true
+fc-cache -f 2>/dev/null || true
 
 AUDIT_OUTPUT="$(dpkg --audit || true)"
 if [[ -n "$AUDIT_OUTPUT" ]]; then
