@@ -1823,6 +1823,56 @@ TARGET=/target
 [ -d "$TARGET" ] || exit 0
 
 rm -f "$TARGET/etc/initramfs-tools/conf.d/trebo-live"
+
+# Keep the installed machine on Trebo Plymouth, even if a package maintainer
+# changed the default alternative while Ubiquity was installing packages.
+if [ -f "$TARGET/usr/share/plymouth/themes/trebo/trebo.plymouth" ]; then
+  chroot "$TARGET" update-alternatives --set default.plymouth \
+    /usr/share/plymouth/themes/trebo/trebo.plymouth >/dev/null 2>&1 || true
+  mkdir -p "$TARGET/etc/plymouth"
+  if [ -f "$TARGET/etc/plymouth/plymouthd.conf" ]; then
+    if grep -q '^Theme=' "$TARGET/etc/plymouth/plymouthd.conf"; then
+      sed -i 's/^Theme=.*/Theme=trebo/' "$TARGET/etc/plymouth/plymouthd.conf"
+    else
+      printf '\nTheme=trebo\n' >> "$TARGET/etc/plymouth/plymouthd.conf"
+    fi
+  else
+    printf '[Daemon]\nTheme=trebo\nShowDelay=0\n' > "$TARGET/etc/plymouth/plymouthd.conf"
+  fi
+fi
+
+python3 - "$TARGET/etc/default/grub" <<'PY_TREBO_TARGET_GRUB'
+from pathlib import Path
+import shlex
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text() if path.exists() else ""
+lines = text.splitlines()
+key = "GRUB_CMDLINE_LINUX_DEFAULT"
+found = False
+out = []
+for line in lines:
+    if line.startswith(key + "="):
+        raw = line.split("=", 1)[1].strip()
+        try:
+            value = shlex.split(raw)[0] if raw else ""
+        except (ValueError, IndexError):
+            value = raw.strip("'\"")
+        args = value.split()
+        for item in ("quiet", "splash"):
+            if item not in args:
+                args.append(item)
+        value = " ".join(args).replace("\\", "\\\\").replace('"', '\\"')
+        out.append(f'{key}="{value}"')
+        found = True
+    else:
+        out.append(line)
+if not found:
+    out.append(f'{key}="quiet splash"')
+path.write_text("\n".join(out) + "\n")
+PY_TREBO_TARGET_GRUB
+
 if [ -f "$TARGET/etc/initramfs-tools/initramfs.conf" ]; then
   if grep -q '^BOOT=' "$TARGET/etc/initramfs-tools/initramfs.conf"; then
     sed -i 's/^BOOT=.*/BOOT=local/' "$TARGET/etc/initramfs-tools/initramfs.conf"
@@ -1936,8 +1986,71 @@ Plymouth.SetRefreshFunction(refresh_callback);
 Plymouth.SetMessageFunction(message_callback);
 EOF_PLYMOUTH_SCRIPT
 
-update-alternatives   --install /usr/share/plymouth/themes/default.plymouth   default.plymouth "$THEME/trebo.plymouth" 500
-update-alternatives   --set default.plymouth "$THEME/trebo.plymouth"
+update-alternatives \
+  --install /usr/share/plymouth/themes/default.plymouth \
+  default.plymouth "$THEME/trebo.plymouth" 500
+update-alternatives --set default.plymouth "$THEME/trebo.plymouth"
+
+# Make the Trebo theme explicit in Plymouth's own configuration too. Ubuntu
+# normally relies on the default.plymouth alternative, but keeping both in
+# agreement prevents later package upgrades from silently falling back.
+mkdir -p /etc/plymouth
+if [[ -f /etc/plymouth/plymouthd.conf ]]; then
+  if grep -q '^Theme=' /etc/plymouth/plymouthd.conf; then
+    sed -i 's/^Theme=.*/Theme=trebo/' /etc/plymouth/plymouthd.conf
+  else
+    printf '\nTheme=trebo\n' >> /etc/plymouth/plymouthd.conf
+  fi
+else
+  cat > /etc/plymouth/plymouthd.conf <<'EOF_TREBO_PLYMOUTHD'
+[Daemon]
+Theme=trebo
+ShowDelay=0
+EOF_TREBO_PLYMOUTHD
+fi
+
+[[ "$(readlink -f /usr/share/plymouth/themes/default.plymouth)" == "$THEME/trebo.plymouth" ]] || {
+  echo "Trebo Plymouth is not the selected default theme." >&2
+  exit 1
+}
+
+# Plymouth can be fully present in the initramfs and still never appear if
+# GRUB stopped passing the "splash" kernel argument during the Focal -> Noble
+# transition. Re-assert quiet+splash while preserving every existing argument.
+python3 - /etc/default/grub <<'PY_TREBO_GRUB_SPLASH'
+from pathlib import Path
+import shlex
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text() if path.exists() else ""
+lines = text.splitlines()
+key = "GRUB_CMDLINE_LINUX_DEFAULT"
+found = False
+result = []
+
+for line in lines:
+    if line.startswith(key + "="):
+        raw = line.split("=", 1)[1].strip()
+        try:
+            value = shlex.split(raw)[0] if raw else ""
+        except (ValueError, IndexError):
+            value = raw.strip("'\"")
+        args = value.split()
+        for required in ("quiet", "splash"):
+            if required not in args:
+                args.append(required)
+        escaped = " ".join(args).replace("\\", "\\\\").replace('"', '\\"')
+        result.append(f'{key}="{escaped}"')
+        found = True
+    else:
+        result.append(line)
+
+if not found:
+    result.append(f'{key}="quiet splash"')
+
+path.write_text("\n".join(result) + "\n")
+PY_TREBO_GRUB_SPLASH
 
 # Casper uses this message when the live medium should be removed.
 if [[ -f /sbin/casper-stop ]]; then
@@ -2020,7 +2133,19 @@ if [[ "$REBUILD_LIVE_INITRD" == "1" ]]; then
     exit 1
   fi
 
-  echo "Verified Linux 7 live initramfs contains Casper and Trebo Plymouth."
+  if ! grep -F 'usr/share/plymouth/themes/trebo/trebo.script' "$INITRD_LIST" >/dev/null; then
+    echo "Linux 7 live initramfs does not contain the Trebo Plymouth script." >&2
+    rm -f "$INITRD_LIST"
+    exit 1
+  fi
+
+  if ! grep -E '/plymouth/script\.so$' "$INITRD_LIST" >/dev/null; then
+    echo "Linux 7 live initramfs does not contain Plymouth's script plugin." >&2
+    rm -f "$INITRD_LIST"
+    exit 1
+  fi
+
+  echo "Verified Linux 7 live initramfs contains Casper and the COMPLETE Trebo Plymouth theme."
   rm -f "$INITRD_LIST"
 
   # Keep the Casper-enabled initrd OUTSIDE /boot before returning the rootfs
@@ -2042,6 +2167,36 @@ fi
 if [[ "${TREBO_QUICK:-0}" != "1" || "${TREBO_REFRESH_INITRD:-0}" == "1" ]]; then
   echo "Rebuilding rootfs Linux 7 initramfs for normal installed-system boot..."
   update-initramfs -u -k "$KVER"
+
+  NORMAL_INITRD_LIST="$(mktemp)"
+  lsinitramfs "/boot/initrd.img-$KVER" > "$NORMAL_INITRD_LIST"
+
+  for required in \
+    'usr/share/plymouth/themes/trebo/trebo.plymouth' \
+    'usr/share/plymouth/themes/trebo/trebo.script' \
+    'usr/share/plymouth/themes/trebo/background.png'
+  do
+    grep -Fq "$required" "$NORMAL_INITRD_LIST" || {
+      echo "Normal Linux 7 initramfs is missing Trebo Plymouth asset: $required" >&2
+      rm -f "$NORMAL_INITRD_LIST"
+      exit 1
+    }
+  done
+
+  grep -Eq '/plymouth/script\.so$' "$NORMAL_INITRD_LIST" || {
+    echo "Normal Linux 7 initramfs is missing Plymouth's script plugin." >&2
+    rm -f "$NORMAL_INITRD_LIST"
+    exit 1
+  }
+
+  if grep -Fxq 'scripts/casper' "$NORMAL_INITRD_LIST"; then
+    echo "Normal installed-system initramfs unexpectedly still contains Casper." >&2
+    rm -f "$NORMAL_INITRD_LIST"
+    exit 1
+  fi
+
+  rm -f "$NORMAL_INITRD_LIST"
+  echo "Verified normal Linux 7 initramfs contains Trebo Plymouth and no Casper."
 fi
 
 echo "Final Trebo Linux kernel: $KVER"
@@ -2126,6 +2281,18 @@ done
 }
 grep -q '^BOOT=local$' /etc/initramfs-tools/initramfs.conf || {
   echo "Reusable rootfs is not configured for normal local-root initramfs boot." >&2
+  exit 1
+}
+[[ "$(readlink -f /usr/share/plymouth/themes/default.plymouth)" == "/usr/share/plymouth/themes/trebo/trebo.plymouth" ]] || {
+  echo "Reusable rootfs lost Trebo as the default Plymouth theme." >&2
+  exit 1
+}
+grep -q '^Theme=trebo$' /etc/plymouth/plymouthd.conf || {
+  echo "Plymouth daemon configuration does not explicitly select Trebo." >&2
+  exit 1
+}
+grep -E '^GRUB_CMDLINE_LINUX_DEFAULT=.*(^|[[:space:]])splash([[:space:]]|")' /etc/default/grub >/dev/null || {
+  echo "Installed-system GRUB defaults do not request Plymouth splash." >&2
   exit 1
 }
 if [[ "${TREBO_QUICK:-0}" != "1" || "${TREBO_REFRESH_INITRD:-0}" == "1" ]]; then
@@ -2398,6 +2565,8 @@ do
   # prompt. Add it only to boot=casper kernel command lines and only once.
   sed -i -E '/boot=casper/ {
     /(^|[[:space:]])noprompt([[:space:]]|$)/! s/(boot=casper)([[:space:]])/\1 noprompt\2/
+    /(^|[[:space:]])quiet([[:space:]]|$)/! s/(boot=casper)([[:space:]])/\1 quiet\2/
+    /(^|[[:space:]])splash([[:space:]]|$)/! s/(boot=casper)([[:space:]])/\1 splash\2/
   }' "$boot_file"
 done
 
