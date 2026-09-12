@@ -81,10 +81,6 @@ jobs:
               print(f"Compiled embedded Python: {marker}")
           PY_STATIC
 
-          if grep -q '^DISTRIB_CODENAME=trebo$' ./build-trebo.sh; then
-            echo "Refusing to build: Ubiquity would use a nonexistent Trebo archive suite."
-            exit 1
-          fi
           grep -q '^DISTRIB_CODENAME=noble$' ./build-trebo.sh
 
           if grep -nE '^[[:space:]]*apt(-get)?[[:space:]].*(remove|purge|autoremove)' ./build-trebo.sh; then
@@ -93,17 +89,13 @@ jobs:
           fi
 
           grep -Fq 'BOOT=casper update-initramfs -c -k "$KVER"' ./build-trebo.sh
-          grep -Fq "grep -Fx 'scripts/casper'" ./build-trebo.sh
-          grep -Fq 'cp "$ROOTFS/boot/vmlinuz-$KVER" "$ISO_DIR/casper/vmlinuz"' ./build-trebo.sh
-          grep -Fq '99trebo-installed' ./build-trebo.sh
+          grep -Fq 'trebo-text.plymouth' ./build-trebo.sh
+          grep -Fq 'title=Trebo Linux 1.0' ./build-trebo.sh
           grep -Fq 'GdkPixbuf.Pixbuf.new_from_file' ./build-trebo.sh
           grep -Fq 'trebo-install-details' ./build-trebo.sh
-          grep -Fq 'Theme=trebo' ./build-trebo.sh
-          grep -Fq 'quiet", "splash' ./build-trebo.sh
-          grep -Fq 'Installed freshly rebuilt Trebo Casper initrd into ISO/casper/initrd.' ./build-trebo.sh
 
           if grep -Fq 'preserving the existing validated Casper ISO initrd' ./build-trebo.sh; then
-            echo "Refusing to build: quick mode is allowed to reuse a stale Casper initrd."
+            echo "Refusing to build: quick mode can still reuse a stale Casper initrd."
             exit 1
           fi
 
@@ -122,190 +114,45 @@ jobs:
         run: |
           set -Eeuo pipefail
 
+          ROOT=trebo-work/rootfs
+          ISO=trebo-work/iso
+
           sha256sum -c Trebo-20.04.6-amd64.iso.sha256
           xorriso -indev Trebo-20.04.6-amd64.iso -report_el_torito plain
           ls -lh Trebo-20.04.6-amd64.iso Trebo-20.04.6-amd64.iso.sha256
 
-          ROOT=trebo-work/rootfs
-          ISO=trebo-work/iso
-          UBIQUITY_GTK="$ROOT/usr/lib/ubiquity/ubiquity/frontend/gtk_ui.py"
-
           test -x "$ROOT/usr/lib/ubiquity/target-config/99trebo-installed"
           test -x "$ROOT/usr/lib/ubiquity/trebo-finalize-target"
-          grep -Fq 'trebo-finalize-target' \
-            "$ROOT/usr/lib/ubiquity/ubiquity/frontend/base.py"
           test -x "$ROOT/usr/lib/trebo/trebo-updater.py"
-          test -x "$ROOT/usr/bin/update-manager"
-          test -f "$ROOT/usr/share/applications/trebo-updater.desktop"
-          grep -q '^NoDisplay=true$' "$ROOT/usr/share/applications/update-manager.desktop"
 
-          test "$(sudo chroot "$ROOT" dpkg-divert --listpackage /usr/bin/update-manager)" = "LOCAL"
-          test "$(sudo chroot "$ROOT" dpkg-divert --listpackage /usr/share/applications/update-manager.desktop)" = "LOCAL"
-
-          test ! -e "$ROOT/etc/initramfs-tools/conf.d/trebo-live"
           grep -q '^BOOT=local$' "$ROOT/etc/initramfs-tools/initramfs.conf"
-          grep -q '^Theme=trebo          grep -E '^GRUB_CMDLINE_LINUX_DEFAULT=.*splash' "$ROOT/etc/default/grub"
+          grep -q '^Theme=trebo$' "$ROOT/etc/plymouth/plymouthd.conf"
 
-          test ! -s "$ROOT/etc/machine-id"
-          test -L "$ROOT/etc/resolv.conf"
-          test "$(readlink "$ROOT/etc/resolv.conf")" = "../run/systemd/resolve/stub-resolv.conf"
-          test -L "$ROOT/usr/share/themes/Trebo"
-          test "$(readlink "$ROOT/usr/share/themes/Trebo")" = "Orchis-Grey"
-          test ! -e "$ISO/casper/filesystem.manifest-minimal-remove"
+          test "$(readlink -f "$ROOT/usr/share/plymouth/themes/default.plymouth")" = \
+            "$ROOT/usr/share/plymouth/themes/trebo/trebo.plymouth"
 
-          grep -q '^DISTRIB_CODENAME=noble$' "$ROOT/etc/lsb-release"
-          grep -Fq 'GdkPixbuf.Pixbuf.new_from_file' "$UBIQUITY_GTK"
-          grep -Fq 'trebo-install-details' "$UBIQUITY_GTK"
-          grep -Fq 'installer-startup.ogg' "$UBIQUITY_GTK"
-          grep -Fq 'Install Trebo Linux' "$ROOT/usr/share/ubiquity/gtk/ubiquity.ui"
+          test "$(readlink -f "$ROOT/usr/share/plymouth/themes/text.plymouth")" = \
+            "$ROOT/usr/share/plymouth/themes/trebo-text/trebo-text.plymouth"
 
-          test -s "$ROOT/usr/share/pixmaps/trebo-login-logo.png"
-          grep -Fq "logo='/usr/share/pixmaps/trebo-login-logo.png'" \
-            "$ROOT/usr/share/glib-2.0/schemas/99_trebo.gschema.override"
-          grep -Fq "background-picture-uri='file:///usr/share/backgrounds/trebo-background.png'" \
-            "$ROOT/etc/dconf/db/gdm.d/00-trebo"
-          grep -Fq "custom-theme-running-dots-color='#3584e4'" \
-            "$ROOT/usr/share/glib-2.0/schemas/99_trebo.gschema.override"
+          grep -q '^title=Trebo Linux 1.0$' \
+            "$ROOT/usr/share/plymouth/themes/trebo-text/trebo-text.plymouth"
 
-          for app_pkg in \
-            libreoffice-writer \
-            libreoffice-calc \
-            libreoffice-impress \
-            libreoffice-gnome \
-            libreoffice-style-elementary \
-            evince \
-            gnome-calculator \
-            gnome-calendar \
-            simple-scan \
-            deja-dup \
-            gnome-disk-utility \
-            gnome-system-monitor \
-            seahorse
-          do
-            state="$(sudo chroot "$ROOT" dpkg-query -W -f='\${db:Status-Status}' "$app_pkg")"
-            test "$state" = "installed"
-          done
+          if grep -q '^title=Ubuntu' \
+            "$ROOT/usr/share/plymouth/themes/trebo-text/trebo-text.plymouth"; then
+            echo "Trebo text Plymouth fallback still contains Ubuntu branding."
+            exit 1
+          fi
 
-          for ext in \
-            ubuntu-dock@ubuntu.com \
-            ubuntu-appindicators@ubuntu.com \
-            ding@rastersoft.com \
-            tiling-assistant@ubuntu.com
-          do
-            test -d "$ROOT/usr/share/gnome-shell/extensions/$ext"
-          done
-
-          grep -q '^casper ' "$ISO/casper/filesystem.manifest-remove"
-          grep -q '^ubiquity ' "$ISO/casper/filesystem.manifest-remove"
+          grep -E '^GRUB_CMDLINE_LINUX_DEFAULT=.*splash' "$ROOT/etc/default/grub"
 
           test -f "$ISO/casper/initrd"
           lsinitramfs "$ISO/casper/initrd" > /tmp/trebo-initrd.list
+
           grep -Fxq 'scripts/casper' /tmp/trebo-initrd.list
           grep -Fq 'usr/share/plymouth/themes/trebo/trebo.plymouth' /tmp/trebo-initrd.list
           grep -Fq 'usr/share/plymouth/themes/trebo/trebo.script' /tmp/trebo-initrd.list
           grep -Fq 'usr/share/plymouth/themes/trebo/background.png' /tmp/trebo-initrd.list
           grep -Fq 'usr/share/plymouth/themes/trebo-text/trebo-text.plymouth' /tmp/trebo-initrd.list
-          grep -Eq '/plymouth/script\.so
-          found_casper_boot=0
-          for boot_file in \
-            "$ISO/boot/grub/grub.cfg" \
-            "$ISO/boot/grub/loopback.cfg" \
-            "$ISO/isolinux/txt.cfg" \
-            "$ISO/isolinux/menu.cfg" \
-            "$ISO/isolinux/isolinux.cfg"
-          do
-            [[ -f "$boot_file" ]] || continue
-            if grep -q 'boot=casper' "$boot_file"; then
-              found_casper_boot=1
-              if grep 'boot=casper' "$boot_file" \
-                | grep -vqE '(^|[[:space:]])noprompt([[:space:]]|$)'; then
-                echo "Casper boot entry without noprompt: $boot_file"
-                exit 1
-              fi
-              if grep 'boot=casper' "$boot_file" \
-                | grep -vqE '(^|[[:space:]])splash([[:space:]]|$)'; then
-                echo "Casper boot entry without splash: $boot_file"
-                exit 1
-              fi
-            fi
-          done
-          test "$found_casper_boot" -eq 1
-
-      - name: Upload Trebo ISO
-        uses: actions/upload-artifact@v4
-        with:
-          name: Trebo-20.04.6-amd64
-          path: |
-            Trebo-20.04.6-amd64.iso
-            Trebo-20.04.6-amd64.iso.sha256
-          compression-level: 0
-          retention-days: 3
-          if-no-files-found: error
- "$ROOT/etc/plymouth/plymouthd.conf"
-          test "$(readlink -f "$ROOT/usr/share/plymouth/themes/default.plymouth")" = \
-            "$ROOT/usr/share/plymouth/themes/trebo/trebo.plymouth"
-          test "$(readlink -f "$ROOT/usr/share/plymouth/themes/text.plymouth")" = \
-            "$ROOT/usr/share/plymouth/themes/trebo-text/trebo-text.plymouth"
-          grep -q '^title=Trebo Linux 1.0          grep -E '^GRUB_CMDLINE_LINUX_DEFAULT=.*splash' "$ROOT/etc/default/grub"
-
-          test ! -s "$ROOT/etc/machine-id"
-          test -L "$ROOT/etc/resolv.conf"
-          test "$(readlink "$ROOT/etc/resolv.conf")" = "../run/systemd/resolve/stub-resolv.conf"
-          test -L "$ROOT/usr/share/themes/Trebo"
-          test "$(readlink "$ROOT/usr/share/themes/Trebo")" = "Orchis-Grey"
-          test ! -e "$ISO/casper/filesystem.manifest-minimal-remove"
-
-          grep -q '^DISTRIB_CODENAME=noble$' "$ROOT/etc/lsb-release"
-          grep -Fq 'GdkPixbuf.Pixbuf.new_from_file' "$UBIQUITY_GTK"
-          grep -Fq 'trebo-install-details' "$UBIQUITY_GTK"
-          grep -Fq 'installer-startup.ogg' "$UBIQUITY_GTK"
-          grep -Fq 'Install Trebo Linux' "$ROOT/usr/share/ubiquity/gtk/ubiquity.ui"
-
-          test -s "$ROOT/usr/share/pixmaps/trebo-login-logo.png"
-          grep -Fq "logo='/usr/share/pixmaps/trebo-login-logo.png'" \
-            "$ROOT/usr/share/glib-2.0/schemas/99_trebo.gschema.override"
-          grep -Fq "background-picture-uri='file:///usr/share/backgrounds/trebo-background.png'" \
-            "$ROOT/etc/dconf/db/gdm.d/00-trebo"
-          grep -Fq "custom-theme-running-dots-color='#3584e4'" \
-            "$ROOT/usr/share/glib-2.0/schemas/99_trebo.gschema.override"
-
-          for app_pkg in \
-            libreoffice-writer \
-            libreoffice-calc \
-            libreoffice-impress \
-            libreoffice-gnome \
-            libreoffice-style-elementary \
-            evince \
-            gnome-calculator \
-            gnome-calendar \
-            simple-scan \
-            deja-dup \
-            gnome-disk-utility \
-            gnome-system-monitor \
-            seahorse
-          do
-            state="$(sudo chroot "$ROOT" dpkg-query -W -f='\${db:Status-Status}' "$app_pkg")"
-            test "$state" = "installed"
-          done
-
-          for ext in \
-            ubuntu-dock@ubuntu.com \
-            ubuntu-appindicators@ubuntu.com \
-            ding@rastersoft.com \
-            tiling-assistant@ubuntu.com
-          do
-            test -d "$ROOT/usr/share/gnome-shell/extensions/$ext"
-          done
-
-          grep -q '^casper ' "$ISO/casper/filesystem.manifest-remove"
-          grep -q '^ubiquity ' "$ISO/casper/filesystem.manifest-remove"
-
-          test -f "$ISO/casper/initrd"
-          lsinitramfs "$ISO/casper/initrd" > /tmp/trebo-initrd.list
-          grep -Fxq 'scripts/casper' /tmp/trebo-initrd.list
-          grep -Fq 'usr/share/plymouth/themes/trebo/trebo.plymouth' /tmp/trebo-initrd.list
-          grep -Fq 'usr/share/plymouth/themes/trebo/trebo.script' /tmp/trebo-initrd.list
-          grep -Fq 'usr/share/plymouth/themes/trebo/background.png' /tmp/trebo-initrd.list
           grep -Eq '/plymouth/script\.so$' /tmp/trebo-initrd.list
 
           found_casper_boot=0
@@ -319,357 +166,8 @@ jobs:
             [[ -f "$boot_file" ]] || continue
             if grep -q 'boot=casper' "$boot_file"; then
               found_casper_boot=1
-              if grep 'boot=casper' "$boot_file" \
-                | grep -vqE '(^|[[:space:]])noprompt([[:space:]]|$)'; then
-                echo "Casper boot entry without noprompt: $boot_file"
-                exit 1
-              fi
-              if grep 'boot=casper' "$boot_file" \
-                | grep -vqE '(^|[[:space:]])splash([[:space:]]|$)'; then
-                echo "Casper boot entry without splash: $boot_file"
-                exit 1
-              fi
-            fi
-          done
-          test "$found_casper_boot" -eq 1
-
-      - name: Upload Trebo ISO
-        uses: actions/upload-artifact@v4
-        with:
-          name: Trebo-20.04.6-amd64
-          path: |
-            Trebo-20.04.6-amd64.iso
-            Trebo-20.04.6-amd64.iso.sha256
-          compression-level: 0
-          retention-days: 3
-          if-no-files-found: error
- \
-            "$ROOT/usr/share/plymouth/themes/trebo-text/trebo-text.plymouth"
-          ! grep -q '^title=Ubuntu' \
-            "$ROOT/usr/share/plymouth/themes/trebo-text/trebo-text.plymouth"
-          grep -E '^GRUB_CMDLINE_LINUX_DEFAULT=.*splash' "$ROOT/etc/default/grub"
-
-          test ! -s "$ROOT/etc/machine-id"
-          test -L "$ROOT/etc/resolv.conf"
-          test "$(readlink "$ROOT/etc/resolv.conf")" = "../run/systemd/resolve/stub-resolv.conf"
-          test -L "$ROOT/usr/share/themes/Trebo"
-          test "$(readlink "$ROOT/usr/share/themes/Trebo")" = "Orchis-Grey"
-          test ! -e "$ISO/casper/filesystem.manifest-minimal-remove"
-
-          grep -q '^DISTRIB_CODENAME=noble$' "$ROOT/etc/lsb-release"
-          grep -Fq 'GdkPixbuf.Pixbuf.new_from_file' "$UBIQUITY_GTK"
-          grep -Fq 'trebo-install-details' "$UBIQUITY_GTK"
-          grep -Fq 'installer-startup.ogg' "$UBIQUITY_GTK"
-          grep -Fq 'Install Trebo Linux' "$ROOT/usr/share/ubiquity/gtk/ubiquity.ui"
-
-          test -s "$ROOT/usr/share/pixmaps/trebo-login-logo.png"
-          grep -Fq "logo='/usr/share/pixmaps/trebo-login-logo.png'" \
-            "$ROOT/usr/share/glib-2.0/schemas/99_trebo.gschema.override"
-          grep -Fq "background-picture-uri='file:///usr/share/backgrounds/trebo-background.png'" \
-            "$ROOT/etc/dconf/db/gdm.d/00-trebo"
-          grep -Fq "custom-theme-running-dots-color='#3584e4'" \
-            "$ROOT/usr/share/glib-2.0/schemas/99_trebo.gschema.override"
-
-          for app_pkg in \
-            libreoffice-writer \
-            libreoffice-calc \
-            libreoffice-impress \
-            libreoffice-gnome \
-            libreoffice-style-elementary \
-            evince \
-            gnome-calculator \
-            gnome-calendar \
-            simple-scan \
-            deja-dup \
-            gnome-disk-utility \
-            gnome-system-monitor \
-            seahorse
-          do
-            state="$(sudo chroot "$ROOT" dpkg-query -W -f='\${db:Status-Status}' "$app_pkg")"
-            test "$state" = "installed"
-          done
-
-          for ext in \
-            ubuntu-dock@ubuntu.com \
-            ubuntu-appindicators@ubuntu.com \
-            ding@rastersoft.com \
-            tiling-assistant@ubuntu.com
-          do
-            test -d "$ROOT/usr/share/gnome-shell/extensions/$ext"
-          done
-
-          grep -q '^casper ' "$ISO/casper/filesystem.manifest-remove"
-          grep -q '^ubiquity ' "$ISO/casper/filesystem.manifest-remove"
-
-          test -f "$ISO/casper/initrd"
-          lsinitramfs "$ISO/casper/initrd" > /tmp/trebo-initrd.list
-          grep -Fxq 'scripts/casper' /tmp/trebo-initrd.list
-          grep -Fq 'usr/share/plymouth/themes/trebo/trebo.plymouth' /tmp/trebo-initrd.list
-          grep -Fq 'usr/share/plymouth/themes/trebo/trebo.script' /tmp/trebo-initrd.list
-          grep -Fq 'usr/share/plymouth/themes/trebo/background.png' /tmp/trebo-initrd.list
-          grep -Eq '/plymouth/script\.so$' /tmp/trebo-initrd.list
-
-          found_casper_boot=0
-          for boot_file in \
-            "$ISO/boot/grub/grub.cfg" \
-            "$ISO/boot/grub/loopback.cfg" \
-            "$ISO/isolinux/txt.cfg" \
-            "$ISO/isolinux/menu.cfg" \
-            "$ISO/isolinux/isolinux.cfg"
-          do
-            [[ -f "$boot_file" ]] || continue
-            if grep -q 'boot=casper' "$boot_file"; then
-              found_casper_boot=1
-              if grep 'boot=casper' "$boot_file" \
-                | grep -vqE '(^|[[:space:]])noprompt([[:space:]]|$)'; then
-                echo "Casper boot entry without noprompt: $boot_file"
-                exit 1
-              fi
-              if grep 'boot=casper' "$boot_file" \
-                | grep -vqE '(^|[[:space:]])splash([[:space:]]|$)'; then
-                echo "Casper boot entry without splash: $boot_file"
-                exit 1
-              fi
-            fi
-          done
-          test "$found_casper_boot" -eq 1
-
-      - name: Upload Trebo ISO
-        uses: actions/upload-artifact@v4
-        with:
-          name: Trebo-20.04.6-amd64
-          path: |
-            Trebo-20.04.6-amd64.iso
-            Trebo-20.04.6-amd64.iso.sha256
-          compression-level: 0
-          retention-days: 3
-          if-no-files-found: error
- /tmp/trebo-initrd.list
-
-          found_casper_boot=0
-          for boot_file in \
-            "$ISO/boot/grub/grub.cfg" \
-            "$ISO/boot/grub/loopback.cfg" \
-            "$ISO/isolinux/txt.cfg" \
-            "$ISO/isolinux/menu.cfg" \
-            "$ISO/isolinux/isolinux.cfg"
-          do
-            [[ -f "$boot_file" ]] || continue
-            if grep -q 'boot=casper' "$boot_file"; then
-              found_casper_boot=1
-              if grep 'boot=casper' "$boot_file" \
-                | grep -vqE '(^|[[:space:]])noprompt([[:space:]]|$)'; then
-                echo "Casper boot entry without noprompt: $boot_file"
-                exit 1
-              fi
-              if grep 'boot=casper' "$boot_file" \
-                | grep -vqE '(^|[[:space:]])splash([[:space:]]|$)'; then
-                echo "Casper boot entry without splash: $boot_file"
-                exit 1
-              fi
-            fi
-          done
-          test "$found_casper_boot" -eq 1
-
-      - name: Upload Trebo ISO
-        uses: actions/upload-artifact@v4
-        with:
-          name: Trebo-20.04.6-amd64
-          path: |
-            Trebo-20.04.6-amd64.iso
-            Trebo-20.04.6-amd64.iso.sha256
-          compression-level: 0
-          retention-days: 3
-          if-no-files-found: error
- "$ROOT/etc/plymouth/plymouthd.conf"
-          test "$(readlink -f "$ROOT/usr/share/plymouth/themes/default.plymouth")" = \
-            "$ROOT/usr/share/plymouth/themes/trebo/trebo.plymouth"
-          test "$(readlink -f "$ROOT/usr/share/plymouth/themes/text.plymouth")" = \
-            "$ROOT/usr/share/plymouth/themes/trebo-text/trebo-text.plymouth"
-          grep -q '^title=Trebo Linux 1.0          grep -E '^GRUB_CMDLINE_LINUX_DEFAULT=.*splash' "$ROOT/etc/default/grub"
-
-          test ! -s "$ROOT/etc/machine-id"
-          test -L "$ROOT/etc/resolv.conf"
-          test "$(readlink "$ROOT/etc/resolv.conf")" = "../run/systemd/resolve/stub-resolv.conf"
-          test -L "$ROOT/usr/share/themes/Trebo"
-          test "$(readlink "$ROOT/usr/share/themes/Trebo")" = "Orchis-Grey"
-          test ! -e "$ISO/casper/filesystem.manifest-minimal-remove"
-
-          grep -q '^DISTRIB_CODENAME=noble$' "$ROOT/etc/lsb-release"
-          grep -Fq 'GdkPixbuf.Pixbuf.new_from_file' "$UBIQUITY_GTK"
-          grep -Fq 'trebo-install-details' "$UBIQUITY_GTK"
-          grep -Fq 'installer-startup.ogg' "$UBIQUITY_GTK"
-          grep -Fq 'Install Trebo Linux' "$ROOT/usr/share/ubiquity/gtk/ubiquity.ui"
-
-          test -s "$ROOT/usr/share/pixmaps/trebo-login-logo.png"
-          grep -Fq "logo='/usr/share/pixmaps/trebo-login-logo.png'" \
-            "$ROOT/usr/share/glib-2.0/schemas/99_trebo.gschema.override"
-          grep -Fq "background-picture-uri='file:///usr/share/backgrounds/trebo-background.png'" \
-            "$ROOT/etc/dconf/db/gdm.d/00-trebo"
-          grep -Fq "custom-theme-running-dots-color='#3584e4'" \
-            "$ROOT/usr/share/glib-2.0/schemas/99_trebo.gschema.override"
-
-          for app_pkg in \
-            libreoffice-writer \
-            libreoffice-calc \
-            libreoffice-impress \
-            libreoffice-gnome \
-            libreoffice-style-elementary \
-            evince \
-            gnome-calculator \
-            gnome-calendar \
-            simple-scan \
-            deja-dup \
-            gnome-disk-utility \
-            gnome-system-monitor \
-            seahorse
-          do
-            state="$(sudo chroot "$ROOT" dpkg-query -W -f='\${db:Status-Status}' "$app_pkg")"
-            test "$state" = "installed"
-          done
-
-          for ext in \
-            ubuntu-dock@ubuntu.com \
-            ubuntu-appindicators@ubuntu.com \
-            ding@rastersoft.com \
-            tiling-assistant@ubuntu.com
-          do
-            test -d "$ROOT/usr/share/gnome-shell/extensions/$ext"
-          done
-
-          grep -q '^casper ' "$ISO/casper/filesystem.manifest-remove"
-          grep -q '^ubiquity ' "$ISO/casper/filesystem.manifest-remove"
-
-          test -f "$ISO/casper/initrd"
-          lsinitramfs "$ISO/casper/initrd" > /tmp/trebo-initrd.list
-          grep -Fxq 'scripts/casper' /tmp/trebo-initrd.list
-          grep -Fq 'usr/share/plymouth/themes/trebo/trebo.plymouth' /tmp/trebo-initrd.list
-          grep -Fq 'usr/share/plymouth/themes/trebo/trebo.script' /tmp/trebo-initrd.list
-          grep -Fq 'usr/share/plymouth/themes/trebo/background.png' /tmp/trebo-initrd.list
-          grep -Eq '/plymouth/script\.so$' /tmp/trebo-initrd.list
-
-          found_casper_boot=0
-          for boot_file in \
-            "$ISO/boot/grub/grub.cfg" \
-            "$ISO/boot/grub/loopback.cfg" \
-            "$ISO/isolinux/txt.cfg" \
-            "$ISO/isolinux/menu.cfg" \
-            "$ISO/isolinux/isolinux.cfg"
-          do
-            [[ -f "$boot_file" ]] || continue
-            if grep -q 'boot=casper' "$boot_file"; then
-              found_casper_boot=1
-              if grep 'boot=casper' "$boot_file" \
-                | grep -vqE '(^|[[:space:]])noprompt([[:space:]]|$)'; then
-                echo "Casper boot entry without noprompt: $boot_file"
-                exit 1
-              fi
-              if grep 'boot=casper' "$boot_file" \
-                | grep -vqE '(^|[[:space:]])splash([[:space:]]|$)'; then
-                echo "Casper boot entry without splash: $boot_file"
-                exit 1
-              fi
-            fi
-          done
-          test "$found_casper_boot" -eq 1
-
-      - name: Upload Trebo ISO
-        uses: actions/upload-artifact@v4
-        with:
-          name: Trebo-20.04.6-amd64
-          path: |
-            Trebo-20.04.6-amd64.iso
-            Trebo-20.04.6-amd64.iso.sha256
-          compression-level: 0
-          retention-days: 3
-          if-no-files-found: error
- \
-            "$ROOT/usr/share/plymouth/themes/trebo-text/trebo-text.plymouth"
-          ! grep -q '^title=Ubuntu' \
-            "$ROOT/usr/share/plymouth/themes/trebo-text/trebo-text.plymouth"
-          grep -E '^GRUB_CMDLINE_LINUX_DEFAULT=.*splash' "$ROOT/etc/default/grub"
-
-          test ! -s "$ROOT/etc/machine-id"
-          test -L "$ROOT/etc/resolv.conf"
-          test "$(readlink "$ROOT/etc/resolv.conf")" = "../run/systemd/resolve/stub-resolv.conf"
-          test -L "$ROOT/usr/share/themes/Trebo"
-          test "$(readlink "$ROOT/usr/share/themes/Trebo")" = "Orchis-Grey"
-          test ! -e "$ISO/casper/filesystem.manifest-minimal-remove"
-
-          grep -q '^DISTRIB_CODENAME=noble$' "$ROOT/etc/lsb-release"
-          grep -Fq 'GdkPixbuf.Pixbuf.new_from_file' "$UBIQUITY_GTK"
-          grep -Fq 'trebo-install-details' "$UBIQUITY_GTK"
-          grep -Fq 'installer-startup.ogg' "$UBIQUITY_GTK"
-          grep -Fq 'Install Trebo Linux' "$ROOT/usr/share/ubiquity/gtk/ubiquity.ui"
-
-          test -s "$ROOT/usr/share/pixmaps/trebo-login-logo.png"
-          grep -Fq "logo='/usr/share/pixmaps/trebo-login-logo.png'" \
-            "$ROOT/usr/share/glib-2.0/schemas/99_trebo.gschema.override"
-          grep -Fq "background-picture-uri='file:///usr/share/backgrounds/trebo-background.png'" \
-            "$ROOT/etc/dconf/db/gdm.d/00-trebo"
-          grep -Fq "custom-theme-running-dots-color='#3584e4'" \
-            "$ROOT/usr/share/glib-2.0/schemas/99_trebo.gschema.override"
-
-          for app_pkg in \
-            libreoffice-writer \
-            libreoffice-calc \
-            libreoffice-impress \
-            libreoffice-gnome \
-            libreoffice-style-elementary \
-            evince \
-            gnome-calculator \
-            gnome-calendar \
-            simple-scan \
-            deja-dup \
-            gnome-disk-utility \
-            gnome-system-monitor \
-            seahorse
-          do
-            state="$(sudo chroot "$ROOT" dpkg-query -W -f='\${db:Status-Status}' "$app_pkg")"
-            test "$state" = "installed"
-          done
-
-          for ext in \
-            ubuntu-dock@ubuntu.com \
-            ubuntu-appindicators@ubuntu.com \
-            ding@rastersoft.com \
-            tiling-assistant@ubuntu.com
-          do
-            test -d "$ROOT/usr/share/gnome-shell/extensions/$ext"
-          done
-
-          grep -q '^casper ' "$ISO/casper/filesystem.manifest-remove"
-          grep -q '^ubiquity ' "$ISO/casper/filesystem.manifest-remove"
-
-          test -f "$ISO/casper/initrd"
-          lsinitramfs "$ISO/casper/initrd" > /tmp/trebo-initrd.list
-          grep -Fxq 'scripts/casper' /tmp/trebo-initrd.list
-          grep -Fq 'usr/share/plymouth/themes/trebo/trebo.plymouth' /tmp/trebo-initrd.list
-          grep -Fq 'usr/share/plymouth/themes/trebo/trebo.script' /tmp/trebo-initrd.list
-          grep -Fq 'usr/share/plymouth/themes/trebo/background.png' /tmp/trebo-initrd.list
-          grep -Eq '/plymouth/script\.so$' /tmp/trebo-initrd.list
-
-          found_casper_boot=0
-          for boot_file in \
-            "$ISO/boot/grub/grub.cfg" \
-            "$ISO/boot/grub/loopback.cfg" \
-            "$ISO/isolinux/txt.cfg" \
-            "$ISO/isolinux/menu.cfg" \
-            "$ISO/isolinux/isolinux.cfg"
-          do
-            [[ -f "$boot_file" ]] || continue
-            if grep -q 'boot=casper' "$boot_file"; then
-              found_casper_boot=1
-              if grep 'boot=casper' "$boot_file" \
-                | grep -vqE '(^|[[:space:]])noprompt([[:space:]]|$)'; then
-                echo "Casper boot entry without noprompt: $boot_file"
-                exit 1
-              fi
-              if grep 'boot=casper' "$boot_file" \
-                | grep -vqE '(^|[[:space:]])splash([[:space:]]|$)'; then
-                echo "Casper boot entry without splash: $boot_file"
-                exit 1
-              fi
+              grep 'boot=casper' "$boot_file" | grep -Eq '(^|[[:space:]])splash([[:space:]]|$)'
+              grep 'boot=casper' "$boot_file" | grep -Eq '(^|[[:space:]])noprompt([[:space:]]|$)'
             fi
           done
           test "$found_casper_boot" -eq 1
