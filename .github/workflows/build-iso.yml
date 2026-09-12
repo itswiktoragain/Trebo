@@ -117,9 +117,9 @@ jobs:
           ROOT=trebo-work/rootfs
           ISO=trebo-work/iso
 
-          sha256sum -c Trebo-20.04.6-amd64.iso.sha256
-          xorriso -indev Trebo-20.04.6-amd64.iso -report_el_torito plain
-          ls -lh Trebo-20.04.6-amd64.iso Trebo-20.04.6-amd64.iso.sha256
+          sha256sum -c Trebo-radiant-redpanda-1.0.iso.sha256
+          xorriso -indev Trebo-radiant-redpanda-1.0.iso -report_el_torito plain
+          ls -lh Trebo-radiant-redpanda-1.0.iso Trebo-radiant-redpanda-1.0.iso.sha256
 
           test -x "$ROOT/usr/lib/ubiquity/target-config/99trebo-installed"
           test -x "$ROOT/usr/lib/ubiquity/trebo-finalize-target"
@@ -175,10 +175,10 @@ jobs:
       - name: Upload Trebo ISO
         uses: actions/upload-artifact@v4
         with:
-          name: Trebo-20.04.6-amd64
+          name: Trebo-radiant-redpanda-1.0
           path: |
-            Trebo-20.04.6-amd64.iso
-            Trebo-20.04.6-amd64.iso.sha256
+            Trebo-radiant-redpanda-1.0.iso
+            Trebo-radiant-redpanda-1.0.iso.sha256
           compression-level: 0
           retention-days: 3
           if-no-files-found: error
