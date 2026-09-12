@@ -247,6 +247,23 @@ install_customization_packages() {
     vlc
     baobab
     file-roller
+
+    # Productivity suite and daily-use desktop tools.
+    libreoffice-writer
+    libreoffice-calc
+    libreoffice-impress
+    libreoffice-gnome
+    libreoffice-style-elementary
+    evince
+    gnome-calculator
+    gnome-calendar
+    simple-scan
+    deja-dup
+    gnome-disk-utility
+    gnome-system-monitor
+    seahorse
+    software-properties-gtk
+
     gnome-session-canberra
     python3-gi
     gir1.2-gtk-3.0
@@ -1179,8 +1196,21 @@ if [[ -e /usr/share/applications/update-manager.desktop || \
   ensure_local_diversion \
     /usr/share/applications/update-manager.desktop \
     /usr/share/applications/update-manager.desktop.ubuntu
-  install -m0644 /usr/share/applications/trebo-updater.desktop \
-    /usr/share/applications/update-manager.desktop
+
+  # Keep update-manager's desktop ID as a hidden compatibility alias. The
+  # visible menu entry is ONLY trebo-updater.desktop, preventing GNOME Shell
+  # from showing two identical Trebo Updater applications.
+  cat > /usr/share/applications/update-manager.desktop <<'EOF_TREBO_UPDATE_ALIAS'
+[Desktop Entry]
+Type=Application
+Name=Trebo Updater
+Exec=/usr/bin/update-manager
+Icon=trebo-symbolic
+Terminal=false
+NoDisplay=true
+StartupNotify=false
+Categories=System;Settings;
+EOF_TREBO_UPDATE_ALIAS
 fi
 
 # Disable Ubuntu's automatic Update Notifier so it cannot reopen Update Manager.
@@ -1526,69 +1556,14 @@ if shutdown_button is not None:
 tree.write(path, encoding="utf-8", xml_declaration=True)
 PY_TREBO_FINISHED_DIALOG
 
-# Replace the installation-progress slideshow with one deterministic Trebo
-# screen. Do not delete the package's link-core/runtime files; older builds did
-# that and could leave WebKit showing a blank white page.
+# Replace Ubiquity's installation-progress view with pure GTK. The previous
+# WebKit/file:// implementation could render as a completely white rectangle
+# even though installation itself continued. Pure GTK removes WebKit, HTML,
+# locale, JSONP and file-URL permissions from this screen entirely.
 SLIDES=/usr/share/ubiquity-slideshow/slides
 mkdir -p "$SLIDES"
 cp /tmp/trebo-assets/background.png "$SLIDES/trebo-background.png"
 
-cat > "$SLIDES/trebo.html" <<'EOF_SLIDE'
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="color-scheme" content="dark">
-<style>
-html,body {
-  width:100%;
-  height:100%;
-  margin:0;
-  padding:0;
-  overflow:hidden;
-  background:#202020;
-  font-family:Cantarell,DejaVu Sans,sans-serif;
-}
-body {
-  background-image:url('trebo-background.png');
-  background-size:100% 100%;
-  background-position:center center;
-  background-repeat:no-repeat;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  color:#fff;
-}
-#panel {
-  padding:18px 28px;
-  border-radius:14px;
-  background:rgba(20,20,20,.50);
-  text-align:center;
-}
-#title {
-  font-size:30px;
-  font-weight:600;
-}
-#subtitle {
-  margin-top:8px;
-  font-size:16px;
-  opacity:.88;
-}
-</style>
-</head>
-<body>
-  <div id="panel">
-    <div id="title">Trebo is installing</div>
-    <div id="subtitle">You can continue using the computer while files are copied.</div>
-  </div>
-</body>
-</html>
-EOF_SLIDE
-
-# Replace start_slideshow() as one complete method instead of repeatedly
-# editing individual lines. This repairs old trebo-work trees where an earlier
-# build deleted the slideshow runtime, and removes all locale/JSONP/JS
-# dependencies from the installation progress page.
 python3 - "$UBIQUITY_GTK" <<'PY_TREBO_SLIDESHOW'
 from pathlib import Path
 import sys
@@ -1604,43 +1579,104 @@ if start < 0 or end < 0:
     raise SystemExit("Could not locate Ubiquity start_slideshow() method boundaries")
 
 method = r'''    def start_slideshow(self):
-        # Trebo uses one deterministic local progress page. Keeping this
-        # independent of directory.jsonp, translated slideshow directories and
-        # slideshow JavaScript avoids the blank-white WebKit failure seen after
-        # repeated remaster/quick-build iterations.
+        # Trebo renders the installer progress page with GTK directly. This
+        # cannot turn into WebKit's blank white page when file:// loading,
+        # slideshow JavaScript, translations or cache state misbehave.
         misc.drop_privileges_save()
         self.progress_mode.set_current_page(
             self.progress_pages['progress_bar'])
         telemetry.get().add_stage('user_done')
 
-        if not self.slideshow:
-            self.page_mode.hide()
-            misc.regain_privileges_save()
-            return
-
         self.page_section.hide()
 
-        gi.require_version('WebKit2', '4.1')
-        from gi.repository import WebKit2
+        gi.require_version('GdkPixbuf', '2.0')
+        from gi.repository import GdkPixbuf
 
-        context = WebKit2.WebContext.get_default()
-        context.set_cache_model(WebKit2.CacheModel.DOCUMENT_VIEWER)
-        webview = WebKit2.WebView()
+        source = GdkPixbuf.Pixbuf.new_from_file(
+            '/usr/share/backgrounds/trebo-background.png')
 
-        settings = webview.get_settings()
-        settings.set_property('allow-file-access-from-file-urls', True)
-        webview.connect('context-menu', self.on_context_menu)
-        if os.environ.get('UBIQUITY_A11Y_PROFILE') == 'screen-reader':
-            settings.set_property('enable-caret-browsing', True)
+        overlay = Gtk.Overlay()
+        canvas = Gtk.DrawingArea()
+        canvas.set_hexpand(True)
+        canvas.set_vexpand(True)
 
-        webview.connect('decide-policy', self.on_slideshow_link_clicked)
-        webview.show()
-        self.page_mode.insert_page(webview, None, 1)
-        webview.load_uri(
-            'file:///usr/share/ubiquity-slideshow/slides/trebo.html')
+        cache = {'width': 0, 'height': 0, 'pixbuf': None}
+
+        def draw_background(widget, cr):
+            allocation = widget.get_allocation()
+            width = max(1, allocation.width)
+            height = max(1, allocation.height)
+
+            if (cache['pixbuf'] is None or
+                    cache['width'] != width or
+                    cache['height'] != height):
+                cache['pixbuf'] = source.scale_simple(
+                    width, height, GdkPixbuf.InterpType.BILINEAR)
+                cache['width'] = width
+                cache['height'] = height
+
+            Gdk.cairo_set_source_pixbuf(cr, cache['pixbuf'], 0, 0)
+            cr.paint()
+            return False
+
+        canvas.connect('draw', draw_background)
+        overlay.add(canvas)
+
+        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        panel.set_name('trebo-install-panel')
+        panel.set_halign(Gtk.Align.CENTER)
+        panel.set_valign(Gtk.Align.CENTER)
+
+        title = Gtk.Label(label='Trebo is installing')
+        title.set_name('trebo-install-title')
+        panel.pack_start(title, False, False, 0)
+
+        subtitle = Gtk.Label(
+            label='You can continue using the computer while files are copied.')
+        subtitle.set_name('trebo-install-subtitle')
+        panel.pack_start(subtitle, False, False, 0)
+
+        overlay.add_overlay(panel)
+
+        # The details expander sits on a dark progress bar. Orchis can inherit
+        # a dark arrow color there, making the disclosure button look wrong.
+        # Give this one control an explicit Trebo foreground.
+        details = self.builder.get_object('install_details_expander')
+        if details is not None:
+            details.set_name('trebo-install-details')
+
+        provider = Gtk.CssProvider()
+        provider.load_from_data(b'''
+#trebo-install-panel {
+    background-color: rgba(20, 20, 20, 0.58);
+    border-radius: 14px;
+    padding: 18px 28px;
+}
+#trebo-install-title {
+    color: #ffffff;
+    font-size: 30px;
+    font-weight: 600;
+}
+#trebo-install-subtitle {
+    color: rgba(255, 255, 255, 0.88);
+    font-size: 16px;
+}
+#trebo-install-details > title,
+#trebo-install-details > title > arrow,
+#trebo-install-details > title label {
+    color: #ffffff;
+    -gtk-icon-shadow: none;
+}
+''')
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(),
+            provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_USER)
+
+        overlay.show_all()
+        self.page_mode.insert_page(overlay, None, 1)
         self.page_mode.show()
         self.page_mode.set_current_page(1)
-        webview.grab_focus()
         misc.regain_privileges_save()
 
 '''
@@ -1654,7 +1690,7 @@ text = text.replace(
 )
 
 path.write_text(text)
-print("Installed deterministic Trebo Ubiquity progress-screen method.")
+print("Installed pure-GTK Trebo Ubiquity progress screen.")
 PY_TREBO_SLIDESHOW
 
 # Replace only Ubiquity's small logo with a correctly sized dark Trebo mark.
@@ -2021,8 +2057,13 @@ fi
   echo "Trebo Updater diversion for /usr/bin/update-manager is missing." >&2
   exit 1
 }
-grep -Fq "file:///usr/share/ubiquity-slideshow/slides/trebo.html" "$UBIQUITY_GTK" || {
-  echo "Ubiquity is not wired to Trebo's static progress screen." >&2
+grep -Fq "Installed pure-GTK Trebo Ubiquity progress screen." /dev/null 2>/dev/null || true
+grep -Fq "GdkPixbuf.Pixbuf.new_from_file" "$UBIQUITY_GTK" || {
+  echo "Ubiquity is not wired to Trebo's pure-GTK progress screen." >&2
+  exit 1
+}
+grep -Fq "trebo-install-details" "$UBIQUITY_GTK" || {
+  echo "Trebo installer details-expander styling is missing." >&2
   exit 1
 }
 grep -Fq "Install Trebo Linux" "$UBIQUITY_UI" || {
