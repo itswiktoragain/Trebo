@@ -57,23 +57,190 @@ set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C
 
-echo "Updating the Focal package base..."
+echo "Preparing Focal only far enough to install Linux 7..."
 apt-get update
-apt-get -y full-upgrade
+apt-get install -y --no-install-recommends \
+  ca-certificates curl initramfs-tools initramfs-tools-core \
+  kmod linux-base software-properties-common
 
-# Focal keeps the generic GNOME session and Tweaks in Universe.
-apt-get install -y software-properties-common
-add-apt-repository -y universe
-apt-get update
+# ---------------------------------------------------------------------------
+# PHASE 1: KERNEL FIRST
+# ---------------------------------------------------------------------------
+# Do this while the rootfs is still entirely Focal. The latest stable v7.x
+# Ubuntu Mainline build is discovered dynamically, so this does not hardcode a
+# particular 7.x point release.
+MAINLINE_ROOT="https://kernel.ubuntu.com/mainline/"
+KERNEL_DIR="$(
+  curl -fsSL "$MAINLINE_ROOT" \
+    | grep -oE 'href="v7\.[0-9]+(\.[0-9]+)?/"' \
+    | sed -E 's/^href="//; s/"$//' \
+    | sort -V \
+    | tail -n1
+)"
 
+[[ -n "$KERNEL_DIR" ]] || {
+  echo "Could not find a stable Linux 7.x build in Ubuntu Mainline." >&2
+  exit 1
+}
+
+KERNEL_URL="${MAINLINE_ROOT}${KERNEL_DIR}amd64/"
+echo "Installing Linux 7 from: $KERNEL_URL"
+
+rm -rf /tmp/trebo-kernel7
+mkdir -p /tmp/trebo-kernel7
+curl -fsSL "$KERNEL_URL" -o /tmp/trebo-kernel7/index.html
+
+mapfile -t kernel_debs < <(
+  grep -oE 'href="[^"]+\.deb"' /tmp/trebo-kernel7/index.html \
+    | sed -E 's/^href="//; s/"$//' \
+    | grep -E '^linux-(image-unsigned|modules|modules-extra)-.*-generic_.*_amd64\.deb$' \
+    | sort -u
+)
+
+(( ${#kernel_debs[@]} >= 2 )) || {
+  echo "Ubuntu Mainline Linux 7 package set was incomplete:" >&2
+  printf '  %s\n' "${kernel_debs[@]}" >&2
+  exit 1
+}
+
+for deb in "${kernel_debs[@]}"; do
+  echo "Downloading $deb"
+  curl -fL --retry 5 --retry-delay 2 \
+    -o "/tmp/trebo-kernel7/$deb" "${KERNEL_URL}$deb"
+done
+
+# dpkg installs the exact mainline image/modules. apt is only allowed to fix
+# dependencies from the still-Focal repositories at this stage.
+if ! dpkg -i /tmp/trebo-kernel7/*.deb; then
+  apt-get -f install -y
+  dpkg -i /tmp/trebo-kernel7/*.deb
+fi
+
+KVER="$(
+  find /lib/modules -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
+    | grep -E '^7\.' \
+    | sort -V \
+    | tail -n1
+)"
+
+[[ -n "$KVER" ]] || {
+  echo "Linux 7 modules were not installed." >&2
+  exit 1
+}
+[[ -f "/boot/vmlinuz-$KVER" ]] || {
+  echo "Linux 7 kernel image /boot/vmlinuz-$KVER is missing." >&2
+  exit 1
+}
+
+if [[ -f "/boot/initrd.img-$KVER" ]]; then
+  update-initramfs -u -k "$KVER"
+else
+  update-initramfs -c -k "$KVER"
+fi
+
+printf '%s\n' "$KVER" > /tmp/trebo-kernel-version
+echo "Linux 7 installed first: $KVER"
+
+# Keep the original Ubiquity/Casper installer stack before moving the userspace
+# forward. Noble no longer treats Ubiquity as its normal desktop installer, but
+# Trebo explicitly requires Ubiquity, so these packages are protected.
+apt-get install -y --no-install-recommends \
+  ubiquity ubiquity-frontend-gtk casper
+apt-mark hold ubiquity ubiquity-frontend-gtk casper || true
+
+# ---------------------------------------------------------------------------
+# PHASE 2: MODERNIZE THE USERSpace REPOSITORIES
+# ---------------------------------------------------------------------------
+# Move through supported LTS suites in order instead of pointing a Focal rootfs
+# straight at a much newer release in one jump.
+write_ubuntu_sources() {
+  local suite="$1"
+
+  cat > /etc/apt/sources.list <<EOF_SOURCES
+deb http://archive.ubuntu.com/ubuntu $suite main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu $suite-updates main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu $suite-backports main restricted universe multiverse
+deb http://security.ubuntu.com/ubuntu $suite-security main restricted universe multiverse
+EOF_SOURCES
+
+  # Prevent an old ISO-specific source fragment from mixing releases.
+  find /etc/apt/sources.list.d -maxdepth 1 -type f \
+    \( -name '*.list' -o -name '*.sources' \) \
+    -exec mv -f {} {}.trebo-disabled \; 2>/dev/null || true
+}
+
+guard_dist_upgrade() {
+  local simulation
+  simulation="$(mktemp)"
+  apt-get -s full-upgrade > "$simulation"
+
+  for critical in \
+    ubiquity ubiquity-frontend-gtk casper \
+    systemd initramfs-tools grub-pc grub-efi-amd64 \
+    gdm3 gnome-shell
+  do
+    if awk '$1 == "Remv" {print $2}' "$simulation" | grep -qx "$critical"; then
+      echo "Refusing repository upgrade because apt wants to remove critical package: $critical" >&2
+      cat "$simulation" >&2
+      rm -f "$simulation"
+      exit 1
+    fi
+  done
+
+  rm -f "$simulation"
+}
+
+upgrade_to_suite() {
+  local suite="$1"
+  echo "Switching Trebo package repositories to $suite..."
+  write_ubuntu_sources "$suite"
+  apt-get update --allow-releaseinfo-change
+
+  # Let apt perform the release transition, but only after the simulation above
+  # proves it is not taking the boot/desktop/installer core with it.
+  guard_dist_upgrade
+  apt-get -y full-upgrade
+  apt-get -f install -y
+}
+
+# Focal -> Jammy -> Noble. This gives Trebo a modern LTS userspace while the
+# Linux 7 kernel was already installed before either repository transition.
+upgrade_to_suite jammy
+upgrade_to_suite noble
+
+# Install/reassert the generic GNOME desktop from the final repositories.
 echo 'gdm3 shared/default-x-display-manager select gdm3' | debconf-set-selections
+apt-get install -y --no-install-recommends \
+  gdm3 \
+  gnome-shell \
+  gnome-session \
+  gnome-control-center \
+  gnome-terminal \
+  nautilus \
+  gnome-settings-daemon \
+  gnome-tweaks \
+  adwaita-icon-theme \
+  fonts-cantarell \
+  plymouth \
+  plymouth-label \
+  plymouth-theme-spinner
 
-# IMPORTANT:
-# Trebo intentionally does not apt remove, apt purge, or apt autoremove
-# Ubuntu-named packages. Focal's desktop stack has many reverse dependencies
-# through those packages. We keep the package graph intact and neutralize
-# visible branding/files after all package operations are finished.
-apt-get install -y --no-install-recommends   gdm3   gnome-shell   gnome-session   gnome-control-center   gnome-terminal   nautilus   gnome-settings-daemon   gnome-tweaks   adwaita-icon-theme   fonts-cantarell   ubiquity   ubiquity-frontend-gtk   plymouth   plymouth-label   plymouth-theme-spinner
+# Rebuild the Linux 7 initramfs with the final userspace/initramfs tools.
+KVER="$(cat /tmp/trebo-kernel-version)"
+update-initramfs -u -k "$KVER"
+
+# This is the important live-boot safety check. The ISO is allowed to replace
+# casper/vmlinuz+initrd only when the new initrd really contains Casper.
+if ! lsinitramfs "/boot/initrd.img-$KVER" | grep -qE '(^|/)scripts/casper(/|$)'; then
+  echo "Linux 7 initramfs does not contain Casper; refusing to create a broken ISO." >&2
+  exit 1
+fi
+
+[[ -f "/boot/vmlinuz-$KVER" ]] || {
+  echo "Linux 7 kernel disappeared during the userspace upgrade." >&2
+  exit 1
+}
+echo "Final Trebo live kernel: $KVER"
 
 # Rebrand the operating-system identity. On Focal /etc/os-release normally
 # points at /usr/lib/os-release, so write the canonical target directly.
@@ -266,11 +433,8 @@ if [[ -f /sbin/casper-stop ]]; then
   sed -i -E     's|^MSG=.*$|MSG="Please remove media"|; s|^MSG_FALLBACK=.*$|MSG_FALLBACK="Please remove media"|'     /sbin/casper-stop
 fi
 
-# Build installed-system initramfs images normally. We deliberately do not
-# manufacture a replacement casper/live initrd here; the ISO keeps Canonical's
-# known-good live initrd so the remaster cannot be made unbootable by a bad
-# hand-built initramfs.
-update-initramfs -u -k all
+# The Linux 7 initramfs was already rebuilt and Casper-validated above.
+# Do not regenerate it again here.
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
@@ -318,6 +482,18 @@ fi
 cleanup_mounts
 mounted=0
 trap - EXIT
+
+# The live ISO now boots the same Linux 7 kernel installed in the rootfs.
+KVER="$(cat "$ROOTFS/tmp/trebo-kernel-version")"
+[[ "$KVER" == 7.* ]] || die "Refusing to publish ISO: expected Linux 7, got $KVER"
+[[ -f "$ROOTFS/boot/vmlinuz-$KVER" ]] || die "Missing Linux 7 vmlinuz"
+[[ -f "$ROOTFS/boot/initrd.img-$KVER" ]] || die "Missing Linux 7 initrd"
+
+cp "$ROOTFS/boot/vmlinuz-$KVER" "$ISO_DIR/casper/vmlinuz"
+cp "$ROOTFS/boot/initrd.img-$KVER" "$ISO_DIR/casper/initrd"
+
+# Keep the version marker until after the live kernel has been copied.
+rm -f "$ROOTFS/tmp/trebo-kernel-version"
 
 # Media identity.
 printf '%s\n' 'Trebo Linux 20.04.6 - Release amd64' > "$ISO_DIR/.disk/info"
