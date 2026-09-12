@@ -309,6 +309,13 @@ if [[ "${TREBO_QUICK:-0}" == "1" ]]; then
     exit 1
   }
 
+  # Quick mode is for a completed rootfs, not a half-configured dpkg state.
+  # Repair harmless pending configuration first and refuse to customize on top
+  # of unresolved package dependency damage.
+  dpkg --configure -a
+  apt-get -f install -y
+  apt-get check
+
   install_customization_packages
 elif [[ "${TREBO_RESUME_AFTER_UPGRADE:-0}" != "1" ]]; then
 echo "Preparing Focal only far enough to install Linux 7..."
@@ -698,6 +705,11 @@ fi
 # ---------------------------------------------------------------------------
 # Resume builds may still contain an old/broken Ubiquity stack. Quick mode first
 # tests the existing Noble installer and skips the reinstall when it is healthy.
+apt-mark unhold \
+  ubiquity ubiquity-frontend-gtk ubiquity-casper \
+  ubiquity-ubuntu-artwork ubiquity-slideshow-ubuntu casper \
+  >/dev/null 2>&1 || true
+
 UBIQUITY_VERSION="$(dpkg-query -W -f='${Version}' ubiquity 2>/dev/null || true)"
 UBIQUITY_HEALTHY=0
 if [[ "$UBIQUITY_VERSION" == 24.04.* ]] && \
@@ -2029,6 +2041,25 @@ do
     echo "Required GNOME Shell extension directory is missing: $ext" >&2
     exit 1
   }
+done
+
+if [[ "$(dpkg-query -W -f='${db:Status-Status}' lupin-casper 2>/dev/null || true)" == "installed" ]]; then
+  echo "Obsolete lupin-casper survived into final Trebo." >&2
+  exit 1
+fi
+
+if grep -E '^[[:space:]]*deb[[:space:]].*[[:space:]](focal|jammy)([-[:alnum:]]*)?[[:space:]]' \
+  /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null; then
+  echo "Old Focal/Jammy repository is still active in final Trebo." >&2
+  exit 1
+fi
+
+HELD_PACKAGES="$(apt-mark showhold 2>/dev/null || true)"
+for installer_pkg in ubiquity ubiquity-frontend-gtk ubiquity-casper casper; do
+  if printf '%s\n' "$HELD_PACKAGES" | grep -Fx "$installer_pkg" >/dev/null; then
+    echo "Legacy installer package hold survived: $installer_pkg" >&2
+    exit 1
+  fi
 done
 
 # This rootfs is a reusable live/install image. Do not clone build-time machine
