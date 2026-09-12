@@ -42,13 +42,13 @@ Usage:
       customize Trebo, rebuild SquashFS, and create the ISO.
 
   sudo bash ./build-trebo.sh --quick
-      Reuse trebo-work/rootfs. Skip Linux 7 installation, skip Focal/Jammy/
-      Noble release upgrades, skip Ubiquity/Casper reinstalls when healthy,
-      and preserve the existing Linux 7 initramfs. Apply desktop/theme/app
-      changes and rebuild only the SquashFS/ISO.
+      Reuse trebo-work/rootfs. Skip Linux 7 installation and skip Focal/Jammy/
+      Noble release upgrades. Quick mode always regenerates the small initramfs
+      images so Plymouth/Casper can never be stale, but it NEVER rebuilds or
+      reinstalls the Linux kernel.
 
   sudo bash ./build-trebo.sh --quick --refresh-initrd
-      Same as --quick, but also regenerate the existing Linux 7 initramfs.
+      Compatibility alias for --quick. Initramfs refresh is now automatic.
 EOF_USAGE
 }
 
@@ -75,7 +75,16 @@ if [[ "$REFRESH_INITRD" == "1" && "$QUICK" != "1" ]]; then
   die "--refresh-initrd is only meaningful together with --quick"
 fi
 
+if [[ "$QUICK" == "1" && "$REFRESH_INITRD" != "1" ]]; then
+  echo "QUICK MODE: initramfs refresh is automatic; Linux 7 itself will NOT be rebuilt."
+fi
+
 mkdir -p "$WORKDIR"
+
+# Never leave a previous ISO looking like the result of a failed build. A new
+# output ISO/checksum only appears after every customization and validation
+# stage succeeds.
+rm -f "$OUTPUT_ISO" "$OUTPUT_ISO.sha256"
 
 if [[ ! -f "$BASE_ISO" ]]; then
   echo "Downloading Ubuntu 20.04.6 desktop ISO..."
@@ -1907,7 +1916,10 @@ for line in lines:
             value = shlex.split(raw)[0] if raw else ""
         except (ValueError, IndexError):
             value = raw.strip("'\"")
-        args = value.split()
+        args = [
+            arg for arg in value.split()
+            if arg not in ("nosplash", "noplymouth", "plymouth.enable=0", "splash=0")
+        ]
         for item in ("quiet", "splash"):
             if item not in args:
                 args.append(item)
@@ -2193,7 +2205,10 @@ for line in lines:
             value = shlex.split(raw)[0] if raw else ""
         except (ValueError, IndexError):
             value = raw.strip("'\"")
-        args = value.split()
+        args = [
+            arg for arg in value.split()
+            if arg not in ("nosplash", "noplymouth", "plymouth.enable=0", "splash=0")
+        ]
         for required in ("quiet", "splash"):
             if required not in args:
                 args.append(required)
@@ -2243,20 +2258,15 @@ systemctl enable trebo-casper-noprompt.service >/dev/null 2>&1 || true
 # theme, the machine briefly shows Ubuntu and only switches to Trebo after the
 # real root filesystem mounts.
 KVER="$(cat /tmp/trebo-kernel-version)"
-REBUILD_LIVE_INITRD=1
-if [[ "${TREBO_QUICK:-0}" == "1" && "${TREBO_REFRESH_INITRD:-0}" != "1" ]]; then
-  REBUILD_LIVE_INITRD=0
-  echo "QUICK MODE: preserving the existing normal rootfs initrd and Casper ISO initrd."
-  [[ -f "/boot/initrd.img-$KVER" ]] || {
-    echo "Quick mode cannot preserve a missing rootfs initrd: /boot/initrd.img-$KVER" >&2
-    exit 1
-  }
-fi
 
-if [[ "$REBUILD_LIVE_INITRD" == "1" ]]; then
-  echo "Rebuilding Linux 7 LIVE initramfs with Casper + Trebo Plymouth..."
-  rm -f "/boot/initrd.img-$KVER"
-  BOOT=casper update-initramfs -c -k "$KVER"
+# ALWAYS regenerate the live initrd, including in --quick mode. This is cheap
+# compared with kernel installation and prevents an older ISO/casper/initrd
+# from silently surviving after a failed build or Plymouth edit.
+echo "Rebuilding Linux 7 LIVE initramfs with Casper + Trebo Plymouth..."
+rm -f "/boot/initrd.img-$KVER"
+BOOT=casper update-initramfs -c -k "$KVER"
+
+if [[ -f "/boot/initrd.img-$KVER" ]]; then
 
   # Capture the complete listing ONCE, then inspect the file. Do not use
   # "lsinitramfs | grep -q" while pipefail is enabled: grep -q exits as soon
@@ -2308,6 +2318,9 @@ if [[ "$REBUILD_LIVE_INITRD" == "1" ]]; then
   # Keep the Casper-enabled initrd OUTSIDE /boot before returning the rootfs
   # to normal installed-system semantics.
   cp -f "/boot/initrd.img-$KVER" "/tmp/trebo-live-initrd-$KVER"
+else
+  echo "Linux 7 live initramfs was not created: /boot/initrd.img-$KVER" >&2
+  exit 1
 fi
 
 # /etc/initramfs-tools/conf.d/trebo-live exists only to build the live ISO
@@ -2321,39 +2334,35 @@ else
   printf '\nBOOT=local\n' >> /etc/initramfs-tools/initramfs.conf
 fi
 
-if [[ "${TREBO_QUICK:-0}" != "1" || "${TREBO_REFRESH_INITRD:-0}" == "1" ]]; then
-  echo "Rebuilding rootfs Linux 7 initramfs for normal installed-system boot..."
-  update-initramfs -u -k "$KVER"
+echo "Rebuilding rootfs Linux 7 initramfs for normal installed-system boot..."
+update-initramfs -u -k "$KVER"
 
-  NORMAL_INITRD_LIST="$(mktemp)"
-  lsinitramfs "/boot/initrd.img-$KVER" > "$NORMAL_INITRD_LIST"
+NORMAL_INITRD_LIST="$(mktemp)"
+lsinitramfs "/boot/initrd.img-$KVER" > "$NORMAL_INITRD_LIST"
 
-  for required in \
-    'usr/share/plymouth/themes/trebo/trebo.plymouth' \
-    'usr/share/plymouth/themes/trebo/trebo.script' \
-    'usr/share/plymouth/themes/trebo/background.png'
-  do
-    grep -Fq "$required" "$NORMAL_INITRD_LIST" || {
-      echo "Normal Linux 7 initramfs is missing Trebo Plymouth asset: $required" >&2
-      rm -f "$NORMAL_INITRD_LIST"
-      exit 1
-    }
-  done
-
-  grep -Eq '/plymouth/script\.so$' "$NORMAL_INITRD_LIST" || {
-    echo "Normal Linux 7 initramfs is missing Plymouth's script plugin." >&2
+for required in \
+  'usr/share/plymouth/themes/trebo/trebo.plymouth' \
+  'usr/share/plymouth/themes/trebo/trebo.script' \
+  'usr/share/plymouth/themes/trebo/background.png'
+do
+  grep -Fq "$required" "$NORMAL_INITRD_LIST" || {
+    echo "Normal Linux 7 initramfs is missing Trebo Plymouth asset: $required" >&2
     rm -f "$NORMAL_INITRD_LIST"
     exit 1
   }
+done
 
-  # Casper is intentionally installed in the LIVE rootfs, so initramfs-tools
-  # may include its scripts even when BOOT=local. Presence of scripts/casper
-  # here is not evidence that an installed machine will boot as a live system.
-  # Ubiquity removes casper from /target and Trebo performs a final post-install
-  # initramfs rebuild after package cleanup.
+grep -Eq '/plymouth/script\.so$' "$NORMAL_INITRD_LIST" || {
+  echo "Normal Linux 7 initramfs is missing Plymouth's script plugin." >&2
   rm -f "$NORMAL_INITRD_LIST"
-  echo "Verified normal Linux 7 initramfs contains Trebo Plymouth in BOOT=local mode."
-fi
+  exit 1
+}
+
+# Casper is intentionally installed in the LIVE rootfs, so initramfs-tools may
+# include its scripts even when BOOT=local. Ubiquity removes casper from the
+# installed target before the final target initramfs rebuild.
+rm -f "$NORMAL_INITRD_LIST"
+echo "Verified normal Linux 7 initramfs contains Trebo Plymouth in BOOT=local mode."
 
 echo "Final Trebo Linux kernel: $KVER"
 
@@ -2697,16 +2706,11 @@ KVER="$(cat "$ROOTFS/tmp/trebo-kernel-version")"
 
 cp "$ROOTFS/boot/vmlinuz-$KVER" "$ISO_DIR/casper/vmlinuz"
 
-if [[ "$QUICK" == "1" && "$REFRESH_INITRD" != "1" ]]; then
-  [[ -f "$ISO_DIR/casper/initrd" ]] \
-    || die "Quick mode requested initrd preservation but ISO/casper/initrd is missing"
-  echo "QUICK MODE: preserving the existing validated Casper ISO initrd."
-else
-  LIVE_INITRD="$ROOTFS/tmp/trebo-live-initrd-$KVER"
-  [[ -s "$LIVE_INITRD" ]] || die "Missing validated Casper live initrd copy"
-  cp "$LIVE_INITRD" "$ISO_DIR/casper/initrd"
-  rm -f "$LIVE_INITRD"
-fi
+LIVE_INITRD="$ROOTFS/tmp/trebo-live-initrd-$KVER"
+[[ -s "$LIVE_INITRD" ]] || die "Missing freshly validated Casper live initrd copy"
+cp "$LIVE_INITRD" "$ISO_DIR/casper/initrd"
+rm -f "$LIVE_INITRD"
+echo "Installed freshly rebuilt Trebo Casper initrd into ISO/casper/initrd."
 
 # Keep a persistent host-side marker for future --quick runs, while removing
 # the temporary marker from the filesystem that is shipped in the ISO.
@@ -2736,6 +2740,7 @@ do
   # from waiting indefinitely for a keypress after the installation media
   # prompt. Add it only to boot=casper kernel command lines and only once.
   sed -i -E '/boot=casper/ {
+    s/(^|[[:space:]])(nosplash|noplymouth|plymouth\.enable=0|splash=0)([[:space:]]|$)/\1\3/g
     /(^|[[:space:]])noprompt([[:space:]]|$)/! s/(boot=casper)([[:space:]])/\1 noprompt\2/
     /(^|[[:space:]])quiet([[:space:]]|$)/! s/(boot=casper)([[:space:]])/\1 quiet\2/
     /(^|[[:space:]])splash([[:space:]]|$)/! s/(boot=casper)([[:space:]])/\1 splash\2/
