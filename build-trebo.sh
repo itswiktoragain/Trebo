@@ -375,7 +375,7 @@ guard_dist_upgrade() {
     systemd initramfs-tools grub-pc grub-efi-amd64 \
     gdm3 gnome-shell
   do
-    if awk '$1 == "Remv" {print $2}' "$simulation" | grep -qx "$critical"; then
+    if awk '$1 == "Remv" {print $2}' "$simulation" | grep -Fx "$critical" >/dev/null; then
       echo "Refusing repository upgrade because apt wants to remove critical package: $critical" >&2
       cat "$simulation" >&2
       rm -f "$simulation"
@@ -462,7 +462,7 @@ apt-get update
 # Do NOT use apt remove/purge here: that could expand into dependency changes.
 # dpkg --no-act verifies that removing this exact obsolete Wubi helper is safe,
 # and dpkg --remove then removes ONLY that package.
-if dpkg-query -W -f='${db:Status-Status}\n' lupin-casper 2>/dev/null | grep -qx installed; then
+if dpkg-query -W -f='${db:Status-Status}\n' lupin-casper 2>/dev/null | grep -Fx installed >/dev/null; then
   echo "Removing obsolete Focal Wubi helper lupin-casper before modern Casper..."
   if ! dpkg --no-act --remove lupin-casper; then
     echo "Refusing to remove lupin-casper because dpkg reports a dependency problem." >&2
@@ -477,7 +477,7 @@ fi
 casper_simulation="$(mktemp)"
 apt-get -s install --reinstall casper > "$casper_simulation"
 for critical in ubiquity ubiquity-frontend-gtk systemd initramfs-tools gdm3 gnome-shell; do
-  if awk '$1 == "Remv" {print $2}' "$casper_simulation" | grep -qx "$critical"; then
+  if awk '$1 == "Remv" {print $2}' "$casper_simulation" | grep -Fx "$critical" >/dev/null; then
     echo "Refusing Casper refresh because apt wants to remove critical package: $critical" >&2
     cat "$casper_simulation" >&2
     rm -f "$casper_simulation"
@@ -496,6 +496,7 @@ cat > /etc/initramfs-tools/conf.d/trebo-live <<'EOF_TREBO_LIVE'
 BOOT=casper
 MODULES=most
 FRAMEBUFFER=y
+RESUME=none
 EOF_TREBO_LIVE
 
 # Fail before spending time rebuilding the initramfs if the Casper package is
@@ -712,27 +713,41 @@ echo "Rebuilding Linux 7 LIVE initramfs with Casper + Trebo Plymouth..."
 rm -f "/boot/initrd.img-$KVER"
 BOOT=casper update-initramfs -c -k "$KVER"
 
-# Refuse to publish an ISO unless the initrd contains the actual Casper root
-# script. Also print every Casper-related initrd entry on failure so this can
-# never again collapse to a useless one-line error.
-if ! lsinitramfs "/boot/initrd.img-$KVER" | grep -qx 'scripts/casper'; then
+# Capture the complete listing ONCE, then inspect the file. Do not use
+# "lsinitramfs | grep -q" while pipefail is enabled: grep -q exits as soon as
+# it finds a match, which can SIGPIPE lsinitramfs and make a successful check
+# look like a failed pipeline.
+INITRD_LIST="$(mktemp)"
+if ! lsinitramfs "/boot/initrd.img-$KVER" > "$INITRD_LIST"; then
+  echo "Could not list Linux 7 initramfs contents." >&2
+  rm -f "$INITRD_LIST"
+  exit 1
+fi
+
+if ! grep -Fx 'scripts/casper' "$INITRD_LIST" >/dev/null; then
   echo "Linux 7 initramfs is missing /scripts/casper." >&2
   echo "Casper-related files that DID make it into the initramfs:" >&2
-  lsinitramfs "/boot/initrd.img-$KVER" | grep -i casper >&2 || true
+  grep -i casper "$INITRD_LIST" >&2 || true
   echo "Source Casper files in the rootfs:" >&2
   find /usr/share/initramfs-tools -maxdepth 3 -iname '*casper*' -print >&2 || true
+  rm -f "$INITRD_LIST"
   exit 1
 fi
 
-if ! lsinitramfs "/boot/initrd.img-$KVER" | grep -q 'usr/share/plymouth/themes/trebo/trebo.plymouth'; then
+if ! grep -F 'usr/share/plymouth/themes/trebo/trebo.plymouth' "$INITRD_LIST" >/dev/null; then
   echo "Linux 7 initramfs does not contain the Trebo Plymouth theme." >&2
+  rm -f "$INITRD_LIST"
   exit 1
 fi
 
-if ! lsinitramfs "/boot/initrd.img-$KVER" | grep -q 'usr/share/plymouth/themes/trebo/background.png'; then
+if ! grep -F 'usr/share/plymouth/themes/trebo/background.png' "$INITRD_LIST" >/dev/null; then
   echo "Linux 7 initramfs does not contain the Trebo Plymouth background." >&2
+  rm -f "$INITRD_LIST"
   exit 1
 fi
+
+echo "Verified Linux 7 initramfs contains Casper and Trebo Plymouth."
+rm -f "$INITRD_LIST"
 
 echo "Final Trebo live kernel: $KVER"
 
