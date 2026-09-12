@@ -94,6 +94,14 @@ jobs:
           grep -Fq 'GdkPixbuf.Pixbuf.new_from_file' ./build-trebo.sh
           grep -Fq 'trebo-install-details' ./build-trebo.sh
 
+          grep -Fq 'Trebo-radiant-redpanda-1.0.iso' ./build-trebo.sh
+          grep -Fq 'VERSION_CODENAME=radiant-redpanda' ./build-trebo.sh
+          grep -Fq 'TREBO_CODENAME="Radiant Redpanda"' ./build-trebo.sh
+          grep -Fq -- '-comp gzip -Xcompression-level 6' ./build-trebo.sh
+          grep -Fq 'Installed Version' ./build-trebo.sh
+          grep -Fq 'Install Updates' ./build-trebo.sh
+          grep -Fq 'View update history' ./build-trebo.sh
+
           if grep -Fq 'preserving the existing validated Casper ISO initrd' ./build-trebo.sh; then
             echo "Refusing to build: quick mode can still reuse a stale Casper initrd."
             exit 1
