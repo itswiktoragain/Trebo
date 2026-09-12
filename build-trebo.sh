@@ -109,12 +109,146 @@ for deb in "${kernel_debs[@]}"; do
     -o "/tmp/trebo-kernel7/$deb" "${KERNEL_URL}$deb"
 done
 
-# dpkg installs the exact mainline image/modules. apt is only allowed to fix
-# dependencies from the still-Focal repositories at this stage.
-if ! dpkg -i /tmp/trebo-kernel7/*.deb; then
-  apt-get -f install -y
-  dpkg -i /tmp/trebo-kernel7/*.deb
-fi
+# Ubuntu Mainline 7.2 packages currently contain maintainer scripts which call
+# run-parts with BOTH /etc/kernel/*.d and /usr/share/kernel/*.d in one command.
+# run-parts accepts one directory, so the package preinst aborts with:
+#   run-parts: missing operand
+# Patch those maintainer scripts in our local copies before installation.
+# This does not alter the kernel payload itself.
+apt-get install -y --no-install-recommends python3
+
+rm -rf /tmp/trebo-kernel7/fixed /tmp/trebo-kernel7/unpacked
+mkdir -p /tmp/trebo-kernel7/fixed /tmp/trebo-kernel7/unpacked
+
+cat > /tmp/trebo-kernel7/fix-run-parts.py <<'PY_FIX'
+#!/usr/bin/env python3
+import pathlib
+import re
+import sys
+
+PAT_WITH_IMAGE = re.compile(
+    r'''(?m)
+    ^(?P<indent>[ \t]*)
+    DEB_MAINT_PARAMS="\$\*"\s+run-parts\s+--report\s+--exit-on-error\s+
+    --arg=\$version\s*\\\n
+    [ \t]*--arg=(?P<img>"?\$image_path"?)\s+
+    (?P<dir1>/etc/kernel/[A-Za-z0-9_.-]+\.d)\s+
+    (?P<dir2>/usr/share/kernel/[A-Za-z0-9_.-]+\.d)
+    ''',
+    re.VERBOSE,
+)
+
+PAT_NO_IMAGE = re.compile(
+    r'''(?m)
+    ^(?P<indent>[ \t]*)
+    DEB_MAINT_PARAMS="\$\*"\s+run-parts\s+--report\s+--exit-on-error\s+
+    --arg=\$version\s*\\\n
+    [ \t]*(?P<dir1>/etc/kernel/[A-Za-z0-9_.-]+\.d)\s+
+    (?P<dir2>/usr/share/kernel/[A-Za-z0-9_.-]+\.d)
+    ''',
+    re.VERBOSE,
+)
+
+def with_image(match):
+    indent = match.group("indent")
+    image = match.group("img")
+    d1 = match.group("dir1")
+    d2 = match.group("dir2")
+    rp = (
+        'DEB_MAINT_PARAMS="$*" run-parts --report --exit-on-error '
+        '--arg=$version --arg=' + image
+    )
+    return (
+        f"{indent}if [ -d {d1} ]; then {rp} {d1}; fi\n"
+        f"{indent}if [ -d {d2} ]; then {rp} {d2}; fi"
+    )
+
+def no_image(match):
+    indent = match.group("indent")
+    d1 = match.group("dir1")
+    d2 = match.group("dir2")
+    rp = (
+        'DEB_MAINT_PARAMS="$*" run-parts --report --exit-on-error '
+        '--arg=$version'
+    )
+    return (
+        f"{indent}if [ -d {d1} ]; then {rp} {d1}; fi\n"
+        f"{indent}if [ -d {d2} ]; then {rp} {d2}; fi"
+    )
+
+total = 0
+for arg in sys.argv[1:]:
+    path = pathlib.Path(arg)
+    if not path.is_file():
+        continue
+    text = path.read_text()
+    text, n1 = PAT_WITH_IMAGE.subn(with_image, text)
+    text, n2 = PAT_NO_IMAGE.subn(no_image, text)
+    if n1 or n2:
+        path.write_text(text)
+        print(f"Patched {path}: {n1 + n2} run-parts call(s)")
+        total += n1 + n2
+
+if total == 0:
+    raise SystemExit("No buggy dual-directory run-parts calls were found")
+PY_FIX
+chmod +x /tmp/trebo-kernel7/fix-run-parts.py
+
+patched_calls=0
+for deb in "${kernel_debs[@]}"; do
+  src="/tmp/trebo-kernel7/$deb"
+  pkgdir="/tmp/trebo-kernel7/unpacked/${deb%.deb}"
+
+  dpkg-deb -R "$src" "$pkgdir"
+
+  mapfile -t maint_scripts < <(
+    find "$pkgdir/DEBIAN" -maxdepth 1 -type f \
+      \( -name preinst -o -name postinst -o -name prerm -o -name postrm \) \
+      -print
+  )
+
+  if (( ${#maint_scripts[@]} > 0 )); then
+    # Some packages (for example modules) may not contain the broken pattern,
+    # so patch per-package without requiring every package to match.
+    before="$(grep -hEc '/etc/kernel/[^ ]+\.d[[:space:]]+/usr/share/kernel/[^ ]+\.d' "${maint_scripts[@]}" || true)"
+    if (( before > 0 )); then
+      /tmp/trebo-kernel7/fix-run-parts.py "${maint_scripts[@]}"
+      patched_calls=$((patched_calls + before))
+    fi
+  fi
+
+  dpkg-deb -b "$pkgdir" "/tmp/trebo-kernel7/fixed/$deb"
+done
+
+(( patched_calls > 0 )) || {
+  echo "Expected the Linux 7 mainline run-parts bug, but no affected maintainer script was found." >&2
+  exit 1
+}
+
+# Install modules first, then the image. Do NOT run apt-get -f here: these
+# mainline packages are local files and are not present in the Focal archive,
+# so apt cannot re-download a half-installed image package.
+mapfile -t module_debs < <(
+  find /tmp/trebo-kernel7/fixed -maxdepth 1 -type f \
+    \( -name 'linux-modules-*.deb' -o -name 'linux-modules-extra-*.deb' \) \
+    -print | sort
+)
+mapfile -t image_debs < <(
+  find /tmp/trebo-kernel7/fixed -maxdepth 1 -type f \
+    -name 'linux-image-unsigned-*.deb' -print | sort
+)
+
+(( ${#module_debs[@]} > 0 )) || {
+  echo "No patched Linux 7 modules package was produced." >&2
+  exit 1
+}
+(( ${#image_debs[@]} == 1 )) || {
+  echo "Expected exactly one patched Linux 7 image package." >&2
+  exit 1
+}
+
+dpkg -i "${module_debs[@]}"
+dpkg -i "${image_debs[@]}"
 
 KVER="$(
   find /lib/modules -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
@@ -127,6 +261,16 @@ KVER="$(
   echo "Linux 7 modules were not installed." >&2
   exit 1
 }
+
+[[ "$(dpkg-query -W -f='${db:Status-Status}' "linux-modules-$KVER" 2>/dev/null || true)" == "installed" ]] || {
+  echo "Linux 7 modules package is not fully installed." >&2
+  exit 1
+}
+[[ "$(dpkg-query -W -f='${db:Status-Status}' "linux-image-unsigned-$KVER" 2>/dev/null || true)" == "installed" ]] || {
+  echo "Linux 7 image package is not fully installed." >&2
+  exit 1
+}
+
 [[ -f "/boot/vmlinuz-$KVER" ]] || {
   echo "Linux 7 kernel image /boot/vmlinuz-$KVER is missing." >&2
   exit 1
