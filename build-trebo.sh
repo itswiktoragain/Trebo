@@ -1883,14 +1883,25 @@ fi
 echo "Verified Linux 7 initramfs contains Casper and Trebo Plymouth."
 rm -f "$INITRD_LIST"
 
-# /etc/initramfs-tools/conf.d/trebo-live exists only to BUILD the live ISO
-# initrd. Shipping it inside filesystem.squashfs would make an installed Trebo
-# regenerate future initrds with BOOT=casper and RESUME=none. That can cause
-# installed-system boot/shutdown hangs. The already-built live initrd keeps
-# its Casper configuration after this file is removed.
+# Keep the Casper-enabled initrd OUTSIDE /boot before returning the rootfs to
+# normal installed-system semantics. The ISO needs Casper; an installed Trebo
+# must not inherit a live initrd as its normal /boot/initrd.img-*.
+if [[ "${TREBO_QUICK:-0}" != "1" || "${TREBO_REFRESH_INITRD:-0}" == "1" ]]; then
+  cp -f "/boot/initrd.img-$KVER" "/tmp/trebo-live-initrd-$KVER"
+fi
+
+# /etc/initramfs-tools/conf.d/trebo-live exists only to build the live ISO
+# initrd. Remove it, then rebuild /boot/initrd.img-* as a normal installed
+# system initrd. Ubiquity's target hook performs the same repair again after
+# installation as a second line of defence.
 rm -f /etc/initramfs-tools/conf.d/trebo-live
 
-echo "Final Trebo live kernel: $KVER"
+if [[ "${TREBO_QUICK:-0}" != "1" || "${TREBO_REFRESH_INITRD:-0}" == "1" ]]; then
+  echo "Rebuilding rootfs Linux 7 initramfs for normal installed-system boot..."
+  update-initramfs -u -k "$KVER"
+fi
+
+echo "Final Trebo Linux kernel: $KVER"
 
 grep -Fq "installer-startup.ogg" "$UBIQUITY_GTK" || {
   echo "Trebo installer startup audio patch is missing." >&2
@@ -1931,6 +1942,13 @@ if [[ -n "$AUDIT_OUTPUT" ]]; then
   exit 1
 fi
 
+for kernel_pkg in "linux-image-unsigned-$KVER" "linux-modules-$KVER"; do
+  [[ "$(dpkg-query -W -f='${db:Status-Status}' "$kernel_pkg" 2>/dev/null || true)" == "installed" ]] || {
+    echo "Linux 7 package disappeared or is not configured: $kernel_pkg" >&2
+    exit 1
+  }
+done
+
 for pkg in \
   ubuntu-desktop-minimal \
   ubuntu-session \
@@ -1959,6 +1977,12 @@ done
   echo "Live-only initramfs config leaked into the reusable rootfs." >&2
   exit 1
 }
+if [[ "${TREBO_QUICK:-0}" != "1" || "${TREBO_REFRESH_INITRD:-0}" == "1" ]]; then
+  [[ -s "/tmp/trebo-live-initrd-$KVER" ]] || {
+    echo "Validated Casper initrd copy is missing before ISO packaging." >&2
+    exit 1
+  }
+fi
 [[ -x /usr/lib/ubiquity/target-config/99trebo-installed ]] || {
   echo "Trebo Ubiquity installed-system cleanup hook is missing." >&2
   exit 1
@@ -2142,10 +2166,20 @@ trap - EXIT
 KVER="$(cat "$ROOTFS/tmp/trebo-kernel-version")"
 [[ "$KVER" == 7.* ]] || die "Refusing to publish ISO: expected Linux 7, got $KVER"
 [[ -f "$ROOTFS/boot/vmlinuz-$KVER" ]] || die "Missing Linux 7 vmlinuz"
-[[ -f "$ROOTFS/boot/initrd.img-$KVER" ]] || die "Missing Linux 7 initrd"
+[[ -f "$ROOTFS/boot/initrd.img-$KVER" ]] || die "Missing normal Linux 7 rootfs initrd"
 
 cp "$ROOTFS/boot/vmlinuz-$KVER" "$ISO_DIR/casper/vmlinuz"
-cp "$ROOTFS/boot/initrd.img-$KVER" "$ISO_DIR/casper/initrd"
+
+if [[ "$QUICK" == "1" && "$REFRESH_INITRD" != "1" ]]; then
+  [[ -f "$ISO_DIR/casper/initrd" ]] \
+    || die "Quick mode requested initrd preservation but ISO/casper/initrd is missing"
+  echo "QUICK MODE: preserving the existing validated Casper ISO initrd."
+else
+  LIVE_INITRD="$ROOTFS/tmp/trebo-live-initrd-$KVER"
+  [[ -s "$LIVE_INITRD" ]] || die "Missing validated Casper live initrd copy"
+  cp "$LIVE_INITRD" "$ISO_DIR/casper/initrd"
+  rm -f "$LIVE_INITRD"
+fi
 
 # Keep a persistent host-side marker for future --quick runs, while removing
 # the temporary marker from the filesystem that is shipped in the ISO.
