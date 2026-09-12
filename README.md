@@ -26,19 +26,21 @@ For fast desktop/theme/app iterations after you already have a completed Noble `
 sudo bash ./build-trebo.sh --quick
 ```
 
-Quick mode reuses the existing Linux 7 kernel and Noble root filesystem. It skips the Linux 7 download/install, skips Focal -> Jammy -> Noble, avoids reinstalling healthy Ubiquity/Casper, and preserves the existing initramfs. It still applies Trebo customization and rebuilds the SquashFS/ISO.
+Quick mode reuses the existing Linux 7 kernel and Noble root filesystem. It skips the Linux 7 download/install and Focal -> Jammy -> Noble conversion, avoids reinstalling healthy Ubiquity/Casper, reapplies Trebo customization, regenerates the initramfs so Plymouth/Casper cannot go stale, and rebuilds the SquashFS/ISO.
 
 If you deliberately changed Plymouth or other early-boot files and need only the initramfs refreshed:
 
 ```bash
-sudo bash ./build-trebo.sh --quick --refresh-initrd
+sudo bash ./build-trebo.sh --quick
 ```
 
 Output:
 
 ```
-Trebo-20.04.6-amd64.iso
-Trebo-20.04.6-amd64.iso.sha256
+Trebo-radiant-redpanda-1.0.iso
+Trebo-radiant-redpanda-1.0.iso.sha256
 ```
 
 The GitHub Actions workflow also builds the ISO automatically and uploads it as a workflow artifact.
+
+The live filesystem is compressed with **gzip** rather than xz to make repeated remaster builds significantly faster. The script currently uses gzip compression level 6 with a 1 MiB SquashFS block size.
