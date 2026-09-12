@@ -71,6 +71,84 @@ export LC_ALL=C
 
 trap 'rc=$?; echo "Trebo inner build failed at line $LINENO: $BASH_COMMAND (exit $rc)" >&2' ERR
 
+remove_obsolete_lupin_casper() {
+  if dpkg-query -W -f='${db:Status-Status}\n' lupin-casper 2>/dev/null | grep -Fx installed >/dev/null; then
+    echo "Removing obsolete Focal lupin-casper before Casper is upgraded..."
+    if ! dpkg --no-act --remove lupin-casper; then
+      echo "Refusing to remove lupin-casper because dpkg reports a dependency problem." >&2
+      return 1
+    fi
+    dpkg --remove lupin-casper
+  fi
+}
+
+write_ubuntu_sources() {
+  local suite="$1"
+
+  cat > /etc/apt/sources.list <<EOF_SOURCES
+deb http://archive.ubuntu.com/ubuntu $suite main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu $suite-updates main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu $suite-backports main restricted universe multiverse
+deb http://security.ubuntu.com/ubuntu $suite-security main restricted universe multiverse
+EOF_SOURCES
+
+  find /etc/apt/sources.list.d -maxdepth 1 -type f \
+    \( -name '*.list' -o -name '*.sources' \) \
+    -exec mv -f {} {}.trebo-disabled \; 2>/dev/null || true
+}
+
+guard_dist_upgrade() {
+  local simulation
+  simulation="$(mktemp)"
+  apt-get -s full-upgrade > "$simulation"
+
+  for critical in \
+    ubiquity ubiquity-frontend-gtk casper \
+    systemd initramfs-tools grub-pc grub-efi-amd64 \
+    gdm3 gnome-shell
+  do
+    if awk '$1 == "Remv" {print $2}' "$simulation" | grep -Fx "$critical" >/dev/null; then
+      echo "Refusing repository upgrade because apt wants to remove critical package: $critical" >&2
+      cat "$simulation" >&2
+      rm -f "$simulation"
+      return 1
+    fi
+  done
+
+  rm -f "$simulation"
+}
+
+upgrade_to_suite() {
+  local suite="$1"
+  echo "Switching Trebo package repositories to $suite..."
+  write_ubuntu_sources "$suite"
+  apt-get update --allow-releaseinfo-change
+  guard_dist_upgrade
+  apt-get -y full-upgrade
+  apt-get -f install -y
+}
+
+install_final_desktop() {
+  echo 'gdm3 shared/default-x-display-manager select gdm3' | debconf-set-selections
+  apt-get install -y --no-install-recommends \
+    gdm3 \
+    gnome-shell \
+    gnome-session \
+    gnome-control-center \
+    gnome-terminal \
+    nautilus \
+    gnome-settings-daemon \
+    gnome-tweaks \
+    adwaita-icon-theme \
+    fonts-cantarell \
+    plymouth \
+    plymouth-label \
+    plymouth-theme-spinner \
+    gnome-shell-extension-ubuntu-dock \
+    papirus-icon-theme \
+    bibata-cursor-theme
+}
+
 if [[ "${TREBO_RESUME_AFTER_UPGRADE:-0}" != "1" ]]; then
 echo "Preparing Focal only far enough to install Linux 7..."
 apt-get update
@@ -357,80 +435,18 @@ apt-get install -y --no-install-recommends \
 # ---------------------------------------------------------------------------
 # Move through supported LTS suites in order instead of pointing a Focal rootfs
 # straight at a much newer release in one jump.
-write_ubuntu_sources() {
-  local suite="$1"
-
-  cat > /etc/apt/sources.list <<EOF_SOURCES
-deb http://archive.ubuntu.com/ubuntu $suite main restricted universe multiverse
-deb http://archive.ubuntu.com/ubuntu $suite-updates main restricted universe multiverse
-deb http://archive.ubuntu.com/ubuntu $suite-backports main restricted universe multiverse
-deb http://security.ubuntu.com/ubuntu $suite-security main restricted universe multiverse
-EOF_SOURCES
-
-  # Prevent an old ISO-specific source fragment from mixing releases.
-  find /etc/apt/sources.list.d -maxdepth 1 -type f \
-    \( -name '*.list' -o -name '*.sources' \) \
-    -exec mv -f {} {}.trebo-disabled \; 2>/dev/null || true
-}
-
-guard_dist_upgrade() {
-  local simulation
-  simulation="$(mktemp)"
-  apt-get -s full-upgrade > "$simulation"
-
-  for critical in \
-    ubiquity ubiquity-frontend-gtk casper \
-    systemd initramfs-tools grub-pc grub-efi-amd64 \
-    gdm3 gnome-shell
-  do
-    if awk '$1 == "Remv" {print $2}' "$simulation" | grep -Fx "$critical" >/dev/null; then
-      echo "Refusing repository upgrade because apt wants to remove critical package: $critical" >&2
-      cat "$simulation" >&2
-      rm -f "$simulation"
-      exit 1
-    fi
-  done
-
-  rm -f "$simulation"
-}
-
-upgrade_to_suite() {
-  local suite="$1"
-  echo "Switching Trebo package repositories to $suite..."
-  write_ubuntu_sources "$suite"
-  apt-get update --allow-releaseinfo-change
-
-  # Let apt perform the release transition, but only after the simulation above
-  # proves it is not taking the boot/desktop/installer core with it.
-  guard_dist_upgrade
-  apt-get -y full-upgrade
-  apt-get -f install -y
-}
-
-# Focal -> Jammy -> Noble. This gives Trebo a modern LTS userspace while the
-# Linux 7 kernel was already installed before either repository transition.
+# Focal -> Jammy -> Noble. Jammy's Casper 1.470.x already owns
+# casper-premount/20iso_scan, so Focal's obsolete lupin-casper MUST be gone
+# before the very first release upgrade begins.
+remove_obsolete_lupin_casper
 upgrade_to_suite jammy
-upgrade_to_suite noble
+printf '%s\n' jammy > /tmp/trebo-userspace-stage
 
-# Install/reassert the generic GNOME desktop from the final repositories.
-echo 'gdm3 shared/default-x-display-manager select gdm3' | debconf-set-selections
-apt-get install -y --no-install-recommends \
-  gdm3 \
-  gnome-shell \
-  gnome-session \
-  gnome-control-center \
-  gnome-terminal \
-  nautilus \
-  gnome-settings-daemon \
-  gnome-tweaks \
-  adwaita-icon-theme \
-  fonts-cantarell \
-  plymouth \
-  plymouth-label \
-  plymouth-theme-spinner \
-  gnome-shell-extension-ubuntu-dock \
-  papirus-icon-theme \
-  bibata-cursor-theme
+upgrade_to_suite noble
+printf '%s\n' noble > /tmp/trebo-userspace-stage
+
+install_final_desktop
+touch /tmp/trebo-userspace-noble-complete
 
 # The final Linux 7 initramfs is deliberately rebuilt later, after the
 # Trebo Plymouth theme is installed and selected. Rebuilding it here would
@@ -443,7 +459,6 @@ KVER="$(cat /tmp/trebo-kernel-version)"
   exit 1
 }
 else
-  echo "Skipping completed Linux 7 and repository-upgrade stages."
   KVER="$(cat /tmp/trebo-kernel-version)"
   [[ "$KVER" == 7.* ]] || {
     echo "Resume marker does not describe a Linux 7 kernel: $KVER" >&2
@@ -453,6 +468,62 @@ else
     echo "Resume requested but /boot/vmlinuz-$KVER is missing." >&2
     exit 1
   }
+
+  if [[ -f /tmp/trebo-userspace-noble-complete ]]; then
+    echo "Skipping completed Linux 7 and Noble userspace-upgrade stages."
+  else
+    echo "Resume detected an incomplete userspace release upgrade; repairing it instead of restarting."
+
+    # The known Focal -> Jammy failure leaves hundreds of packages unpacked
+    # after Jammy Casper collides with lupin-casper. Remove that obsolete helper
+    # first, then let dpkg finish configuring what was already unpacked.
+    remove_obsolete_lupin_casper
+
+    current_suite="$(
+      awk '$1 == "deb" && $2 ~ /archive\.ubuntu\.com\/ubuntu/ && $3 !~ /-/ {print $3; exit}' \
+        /etc/apt/sources.list
+    )"
+
+    case "$current_suite" in
+      focal)
+        echo "Resuming from Focal userspace."
+        upgrade_to_suite jammy
+        printf '%s\n' jammy > /tmp/trebo-userspace-stage
+        ;;
+      jammy)
+        echo "Repairing interrupted Jammy upgrade..."
+        apt-get update --allow-releaseinfo-change
+        dpkg --configure -a
+        apt-get -f install -y
+        guard_dist_upgrade
+        apt-get -y full-upgrade
+        apt-get -f install -y
+        printf '%s\n' jammy > /tmp/trebo-userspace-stage
+        ;;
+      noble)
+        echo "Repairing interrupted Noble upgrade..."
+        apt-get update --allow-releaseinfo-change
+        dpkg --configure -a
+        apt-get -f install -y
+        guard_dist_upgrade
+        apt-get -y full-upgrade
+        apt-get -f install -y
+        printf '%s\n' noble > /tmp/trebo-userspace-stage
+        ;;
+      *)
+        echo "Cannot determine resume userspace suite from /etc/apt/sources.list: $current_suite" >&2
+        exit 1
+        ;;
+    esac
+
+    if [[ "$current_suite" != "noble" ]]; then
+      upgrade_to_suite noble
+      printf '%s\n' noble > /tmp/trebo-userspace-stage
+    fi
+
+    install_final_desktop
+    touch /tmp/trebo-userspace-noble-complete
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -518,14 +589,7 @@ apt-get update
 # Do NOT use apt remove/purge here: that could expand into dependency changes.
 # dpkg --no-act verifies that removing this exact obsolete Wubi helper is safe,
 # and dpkg --remove then removes ONLY that package.
-if dpkg-query -W -f='${db:Status-Status}\n' lupin-casper 2>/dev/null | grep -Fx installed >/dev/null; then
-  echo "Removing obsolete Focal Wubi helper lupin-casper before modern Casper..."
-  if ! dpkg --no-act --remove lupin-casper; then
-    echo "Refusing to remove lupin-casper because dpkg reports a dependency problem." >&2
-    exit 1
-  fi
-  dpkg --remove lupin-casper
-fi
+remove_obsolete_lupin_casper
 
 # A previous interrupted Casper unpack can leave dpkg's status database in a
 # partial state. Reinstall the single target package directly from the current
