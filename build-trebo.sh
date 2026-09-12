@@ -39,14 +39,25 @@ fi
 
 echo "$BASE_ISO_SHA256  $BASE_ISO" | sha256sum -c -
 
-echo "Preparing working tree..."
-rm -rf "$ISO_DIR" "$ROOTFS"
-mkdir -p "$ISO_DIR"
+RESUME="${RESUME:-0}"
 
-xorriso -osirrox on -indev "$BASE_ISO" -extract / "$ISO_DIR"
-chmod -R u+w "$ISO_DIR"
-unsquashfs -d "$ROOTFS" "$ISO_DIR/casper/filesystem.squashfs"
+if [[ "$RESUME" == "1" ]]; then
+  echo "Resuming existing Trebo work tree..."
+  [[ -d "$ISO_DIR" ]] || die "RESUME=1 requested but $ISO_DIR does not exist"
+  [[ -d "$ROOTFS" ]] || die "RESUME=1 requested but $ROOTFS does not exist"
+  [[ -f "$ROOTFS/tmp/trebo-kernel-version" ]] || die "RESUME=1 requested but the Linux 7 stage marker is missing"
+else
+  echo "Preparing working tree..."
+  rm -rf "$ISO_DIR" "$ROOTFS"
+  mkdir -p "$ISO_DIR"
 
+  xorriso -osirrox on -indev "$BASE_ISO" -extract / "$ISO_DIR"
+  chmod -R u+w "$ISO_DIR"
+  unsquashfs -d "$ROOTFS" "$ISO_DIR/casper/filesystem.squashfs"
+fi
+
+# Recreate assets even during resume so the working tree always uses the
+# current repository versions.
 mkdir -p "$ROOTFS/tmp/trebo-assets"
 rsvg-convert -w 1156 -h 867   -o "$ROOTFS/tmp/trebo-assets/background.png"   "$SCRIPT_DIR/assets/background.svg"
 rsvg-convert -w 507 -h 444   -o "$ROOTFS/tmp/trebo-assets/logo.png"   "$SCRIPT_DIR/assets/logo.svg"
@@ -57,6 +68,7 @@ set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C
 
+if [[ "${TREBO_RESUME_AFTER_UPGRADE:-0}" != "1" ]]; then
 echo "Preparing Focal only far enough to install Linux 7..."
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -414,6 +426,18 @@ KVER="$(cat /tmp/trebo-kernel-version)"
   echo "Linux 7 kernel disappeared during the userspace upgrade." >&2
   exit 1
 }
+else
+  echo "Skipping completed Linux 7 and repository-upgrade stages."
+  KVER="$(cat /tmp/trebo-kernel-version)"
+  [[ "$KVER" == 7.* ]] || {
+    echo "Resume marker does not describe a Linux 7 kernel: $KVER" >&2
+    exit 1
+  }
+  [[ -f "/boot/vmlinuz-$KVER" ]] || {
+    echo "Resume requested but /boot/vmlinuz-$KVER is missing." >&2
+    exit 1
+  }
+fi
 
 # Rebrand the final Noble-based userspace as Trebo.
 cat > /usr/lib/os-release <<'EOF_OS_RELEASE'
@@ -667,7 +691,11 @@ rm -f "$ROOTFS/etc/resolv.conf"
 cp -L /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
 
 echo "Customizing Trebo root filesystem..."
-chroot "$ROOTFS" /bin/bash /tmp/trebo-customize.sh
+if [[ "$RESUME" == "1" ]]; then
+  chroot "$ROOTFS" /usr/bin/env TREBO_RESUME_AFTER_UPGRADE=1 /bin/bash /tmp/trebo-customize.sh
+else
+  chroot "$ROOTFS" /bin/bash /tmp/trebo-customize.sh
+fi
 
 rm -f "$ROOTFS/etc/resolv.conf"
 if [[ -f "$ROOTFS/etc/resolv.conf.trebo-backup" ]]; then
