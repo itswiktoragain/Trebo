@@ -1737,6 +1737,14 @@ method = r'''    def start_slideshow(self):
         if details is not None:
             details.set_name('trebo-install-details')
 
+        install_progress = self.builder.get_object('install_progress')
+        if install_progress is not None:
+            install_progress.set_name('trebo-install-progress')
+
+        progress_skip = self.builder.get_object('progress_cancel_button')
+        if progress_skip is not None:
+            progress_skip.set_name('trebo-progress-skip')
+
         # The lower Ubiquity progress area is a separate GtkEventBox/Notebook
         # from the slideshow page. If left unstyled it inherits the normal
         # light GTK background and looks like a white border under Trebo's
@@ -1793,12 +1801,70 @@ method = r'''    def start_slideshow(self):
 #trebo-progress-row label {
     color: #ffffff;
     background-color: transparent;
+    background-image: none;
+    border: 0;
+    box-shadow: none;
     -gtk-icon-shadow: none;
 }
 
+/* Do not draw a rectangular hover patch behind the "Copying files..." row.
+ * The previous translucent block looked detached from the #202020 strip.
+ * Hover/focus is indicated only by a clean blue foreground change. */
 #trebo-install-details > title:hover,
 #trebo-install-details > title:focus {
-    background-color: rgba(255, 255, 255, 0.06);
+    background-color: transparent;
+    background-image: none;
+    box-shadow: none;
+    color: #65a9ff;
+}
+#trebo-install-details > title:hover > arrow,
+#trebo-install-details > title:focus > arrow,
+#trebo-install-details > title:hover label,
+#trebo-install-details > title:focus label {
+    color: #65a9ff;
+}
+
+/* High-contrast Trebo progress bar: dark trough + obvious blue completed
+ * portion. This avoids the old gray-on-gray appearance. */
+#trebo-install-progress trough {
+    min-height: 10px;
+    background-color: #4a4a4a;
+    background-image: none;
+    border: 0;
+    border-radius: 5px;
+    box-shadow: none;
+}
+#trebo-install-progress progress {
+    min-height: 10px;
+    background-color: #3584e4;
+    background-image: none;
+    border: 0;
+    border-radius: 5px;
+    box-shadow: none;
+}
+
+/* The Skip control must visibly look disabled whenever Ubiquity marks it
+ * insensitive. Orchis otherwise leaves it too close to the enabled state. */
+#trebo-progress-skip {
+    color: #ffffff;
+    background-color: #353535;
+    background-image: none;
+    border: 1px solid #555555;
+    border-radius: 6px;
+    box-shadow: none;
+}
+#trebo-progress-skip:hover:not(:disabled),
+#trebo-progress-skip:focus:not(:disabled) {
+    background-color: #444444;
+    border-color: #6a6a6a;
+}
+#trebo-progress-skip:disabled {
+    color: #777777;
+    background-color: #292929;
+    background-image: none;
+    border-color: #383838;
+    box-shadow: none;
+    opacity: 0.45;
 }
 
 #trebo-install-details scrolledwindow {
@@ -2438,6 +2504,22 @@ grep -Fq "trebo-progress-eventbox" "$UBIQUITY_GTK" || {
 }
 grep -Fq "background-color: #202020" "$UBIQUITY_GTK" || {
   echo "Trebo installer progress area is not using the Trebo background color." >&2
+  exit 1
+}
+grep -Fq "trebo-install-progress" "$UBIQUITY_GTK" || {
+  echo "Trebo installer progress-bar styling is missing." >&2
+  exit 1
+}
+grep -Fq "background-color: #3584e4" "$UBIQUITY_GTK" || {
+  echo "Trebo installer progress bar is missing its blue completed state." >&2
+  exit 1
+}
+grep -Fq "#trebo-progress-skip:disabled" "$UBIQUITY_GTK" || {
+  echo "Trebo installer disabled Skip-button styling is missing." >&2
+  exit 1
+}
+grep -Fq "color: #65a9ff" "$UBIQUITY_GTK" || {
+  echo "Trebo installer details hover styling is missing." >&2
   exit 1
 }
 [[ -f /usr/share/applications/trebo-updater.desktop ]] || {
