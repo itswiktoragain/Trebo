@@ -61,6 +61,7 @@ fi
 mkdir -p "$ROOTFS/tmp/trebo-assets"
 rsvg-convert -w 1156 -h 867   -o "$ROOTFS/tmp/trebo-assets/background.png"   "$SCRIPT_DIR/assets/background.svg"
 rsvg-convert -w 507 -h 444   -o "$ROOTFS/tmp/trebo-assets/logo.png"   "$SCRIPT_DIR/assets/logo.svg"
+install -m0644 "$SCRIPT_DIR/assets/trebo-symbolic.svg" "$ROOTFS/tmp/trebo-assets/trebo-symbolic.svg"
 
 cat > "$ROOTFS/tmp/trebo-customize.sh" <<'CHROOT_EOF'
 #!/usr/bin/env bash
@@ -98,13 +99,24 @@ picture-options='stretched'
 
 [org/gnome/desktop/interface]
 gtk-theme='Adwaita'
-icon-theme='Adwaita'
+icon-theme='Papirus-Trebo'
+cursor-theme='Bibata-Modern-Ice'
 font-name='Cantarell 11'
 document-font-name='Cantarell 11'
 monospace-font-name='Monospace 11'
 
 [org/gnome/shell]
-enabled-extensions=@as []
+enabled-extensions=['ubuntu-dock@ubuntu.com']
+
+[org/gnome/shell/extensions/dash-to-dock]
+dock-position='LEFT'
+dock-fixed=true
+autohide=false
+intellihide=false
+extend-height=true
+show-show-apps-button=true
+show-apps-at-top=false
+dash-max-icon-size=48
 EOF_DCONF_PREFLIGHT
 
   dconf compile /tmp/trebo-dconf-preflight /tmp/trebo-dconf-preflight.d
@@ -334,15 +346,11 @@ fi
 printf '%s\n' "$KVER" > /tmp/trebo-kernel-version
 echo "Linux 7 installed first: $KVER"
 
-# Keep the original Ubiquity/Casper installer stack before moving the userspace
-# forward. Noble no longer treats Ubiquity as its normal desktop installer, but
-# Trebo explicitly requires Ubiquity, so these packages are protected.
+# Seed Ubiquity/Casper before the release transitions. Do NOT hold Ubiquity:
+# Noble still ships a native Ubiquity 24.04.x stack, and freezing the old Focal
+# 20.04 packages across Jammy/Noble creates a mixed, broken installer.
 apt-get install -y --no-install-recommends \
-  ubiquity ubiquity-frontend-gtk casper
-# Ubiquity must stay on the legacy installer stack. Casper, however, should
-# follow the userspace forward so the live-boot scripts match modern
-# initramfs-tools.
-apt-mark hold ubiquity ubiquity-frontend-gtk || true
+  ubiquity ubiquity-frontend-gtk ubiquity-casper casper
 
 # ---------------------------------------------------------------------------
 # PHASE 2: MODERNIZE THE USERSpace REPOSITORIES
@@ -419,7 +427,10 @@ apt-get install -y --no-install-recommends \
   fonts-cantarell \
   plymouth \
   plymouth-label \
-  plymouth-theme-spinner
+  plymouth-theme-spinner \
+  gnome-shell-extension-ubuntu-dock \
+  papirus-icon-theme \
+  bibata-cursor-theme
 
 # The final Linux 7 initramfs is deliberately rebuilt later, after the
 # Trebo Plymouth theme is installed and selected. Rebuilding it here would
@@ -443,6 +454,51 @@ else
     exit 1
   }
 fi
+
+# ---------------------------------------------------------------------------
+# NATIVE NOBLE UBIQUITY
+# ---------------------------------------------------------------------------
+# Resume builds may still contain the previously-held Focal Ubiquity packages.
+# Noble provides Ubiquity 24.04.x, so repair the entire installer stack from
+# the final repositories before applying Trebo branding.
+apt-mark unhold ubiquity ubiquity-frontend-gtk ubiquity-casper casper 2>/dev/null || true
+apt-get update
+
+UBIQUITY_SIMULATION="$(mktemp)"
+apt-get -s install --reinstall \
+  ubiquity ubiquity-frontend-gtk ubiquity-casper ubiquity-ubuntu-artwork \
+  ubiquity-slideshow-ubuntu > "$UBIQUITY_SIMULATION"
+
+for critical in systemd initramfs-tools gdm3 gnome-shell casper; do
+  if awk '$1 == "Remv" {print $2}' "$UBIQUITY_SIMULATION" | grep -Fx "$critical" >/dev/null; then
+    echo "Refusing Ubiquity repair because apt wants to remove critical package: $critical" >&2
+    cat "$UBIQUITY_SIMULATION" >&2
+    rm -f "$UBIQUITY_SIMULATION"
+    exit 1
+  fi
+done
+rm -f "$UBIQUITY_SIMULATION"
+
+apt-get install -y --reinstall --no-install-recommends \
+  ubiquity ubiquity-frontend-gtk ubiquity-casper ubiquity-ubuntu-artwork \
+  ubiquity-slideshow-ubuntu
+
+UBIQUITY_VERSION="$(dpkg-query -W -f='${Version}' ubiquity 2>/dev/null || true)"
+case "$UBIQUITY_VERSION" in
+  24.04.*) ;;
+  *)
+    echo "Expected Noble Ubiquity 24.04.x, got: $UBIQUITY_VERSION" >&2
+    exit 1
+    ;;
+esac
+
+# Test the Python GTK frontend imports before wasting time rebuilding the
+# SquashFS. This catches mixed-release Ubiquity/library problems at build time.
+PYTHONPATH=/usr/lib/ubiquity python3 - <<'PY_UBIQUITY_TEST'
+import ubiquity
+import ubiquity.frontend.gtk_ui
+print("Ubiquity GTK frontend import test passed.")
+PY_UBIQUITY_TEST
 
 # ---------------------------------------------------------------------------
 # LIVE-BOOT INTEGRITY
@@ -543,7 +599,12 @@ printf 'Trebo Linux 1.0\n' > /etc/issue.net
 # No package database operation is used here.
 rm -f   /usr/share/xsessions/ubuntu.desktop   /usr/share/xsessions/ubuntu-xorg.desktop   /usr/share/wayland-sessions/ubuntu.desktop   /usr/share/wayland-sessions/ubuntu-wayland.desktop
 
-rm -rf /usr/share/gnome-shell/extensions/ubuntu-dock@ubuntu.com
+# Keep Noble's Ubuntu Dock extension: Trebo uses it for the left-side dock and
+# replaces the Show Applications glyph with the Trebo logo.
+[[ -d /usr/share/gnome-shell/extensions/ubuntu-dock@ubuntu.com ]] || {
+  echo "Ubuntu Dock extension is missing after installation." >&2
+  exit 1
+}
 
 find /usr/share/backgrounds -maxdepth 2 -type f   \( -iname '*ubuntu*' -o -iname '*focal*' \)   -delete 2>/dev/null || true
 
@@ -557,6 +618,82 @@ done < <(
 
 install -Dm0644 /tmp/trebo-assets/background.png   /usr/share/backgrounds/trebo-background.png
 install -Dm0644 /tmp/trebo-assets/logo.png   /usr/share/pixmaps/trebo-logo.png
+
+
+# ---------------------------------------------------------------------------
+# PAPIRUS-TREBO + BIBATA MODERN ICE
+# ---------------------------------------------------------------------------
+# Use a tiny overlay theme that inherits Papirus. This keeps all Papirus
+# updates/coverage while overriding only Trebo's distro and app-grid symbols.
+TREBO_ICONS=/usr/share/icons/Papirus-Trebo
+rm -rf "$TREBO_ICONS"
+mkdir -p \
+  "$TREBO_ICONS/symbolic/actions" \
+  "$TREBO_ICONS/symbolic/apps" \
+  "$TREBO_ICONS/symbolic/places"
+
+cat > "$TREBO_ICONS/index.theme" <<'EOF_TREBO_ICONS'
+[Icon Theme]
+Name=Papirus Trebo
+Comment=Papirus with Trebo distribution symbols
+Inherits=Papirus,hicolor
+Directories=symbolic/actions,symbolic/apps,symbolic/places
+
+[symbolic/actions]
+Size=16
+MinSize=8
+MaxSize=512
+Type=Scalable
+Context=Actions
+
+[symbolic/apps]
+Size=16
+MinSize=8
+MaxSize=512
+Type=Scalable
+Context=Applications
+
+[symbolic/places]
+Size=16
+MinSize=8
+MaxSize=512
+Type=Scalable
+Context=Places
+EOF_TREBO_ICONS
+
+for icon_name in \
+  view-app-grid-symbolic \
+  view-app-grid-user-symbolic \
+  view-app-grid-ubuntu-symbolic \
+  show-apps-symbolic
+do
+  cp /tmp/trebo-assets/trebo-symbolic.svg \
+    "$TREBO_ICONS/symbolic/actions/$icon_name.svg"
+done
+
+for icon_name in \
+  trebo-symbolic \
+  distributor-logo-symbolic \
+  system-logo-symbolic \
+  start-here-symbolic \
+  ubuntu-logo-symbolic
+do
+  cp /tmp/trebo-assets/trebo-symbolic.svg \
+    "$TREBO_ICONS/symbolic/apps/$icon_name.svg"
+  cp /tmp/trebo-assets/trebo-symbolic.svg \
+    "$TREBO_ICONS/symbolic/places/$icon_name.svg"
+done
+
+# Yaru's package may be a dependency of Ubuntu metapackages, so do not apt
+# remove it and risk another dependency cascade. Remove only its icon payload
+# from the finished image; Papirus-Trebo is the configured icon theme.
+find /usr/share/icons -mindepth 1 -maxdepth 1 -type d -name 'Yaru*' \
+  -exec rm -rf {} + 2>/dev/null || true
+
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -f "$TREBO_ICONS" || true
+  [[ -d /usr/share/icons/Papirus ]] && gtk-update-icon-cache -f /usr/share/icons/Papirus || true
+fi
 
 mkdir -p /etc/dconf/profile /etc/dconf/db/local.d
 
@@ -647,6 +784,23 @@ for ui_file in /usr/share/ubiquity/gtk/*.ui; do
   [[ -f "$ui_file" ]] || continue
   sed -i     -e 's/Welcome to Ubuntu/Welcome to Trebo/g'     -e 's/Install Ubuntu/Install Trebo/g'     -e 's/>Ubuntu</>Trebo</g'     "$ui_file"
 done
+
+
+[[ -f /usr/share/applications/ubiquity.desktop ]] || {
+  echo "Noble Ubiquity desktop launcher is missing." >&2
+  exit 1
+}
+sed -i -E \
+  -e 's/^(Name=).*/\1Install Trebo/' \
+  -e 's/^(GenericName=).*/\1Trebo Installer/' \
+  -e 's/^(Comment=).*/\1Install Trebo Linux/' \
+  /usr/share/applications/ubiquity.desktop
+
+# Give the installer launcher Trebo's logo without altering Ubiquity's program.
+install -Dm0644 /tmp/trebo-assets/trebo-symbolic.svg \
+  /usr/share/icons/hicolor/scalable/apps/trebo-installer-symbolic.svg
+sed -i -E 's/^Icon=.*/Icon=trebo-installer-symbolic/' \
+  /usr/share/applications/ubiquity.desktop
 
 # Trebo Plymouth theme for the installed OS.
 THEME=/usr/share/plymouth/themes/trebo
