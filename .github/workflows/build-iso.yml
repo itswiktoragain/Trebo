@@ -125,6 +125,9 @@ jobs:
           UBIQUITY_GTK="$ROOT/usr/lib/ubiquity/ubiquity/frontend/gtk_ui.py"
 
           test -x "$ROOT/usr/lib/ubiquity/target-config/99trebo-installed"
+          test -x "$ROOT/usr/lib/ubiquity/trebo-finalize-target"
+          grep -Fq 'trebo-finalize-target' \
+            "$ROOT/usr/lib/ubiquity/ubiquity/frontend/base.py"
           test -x "$ROOT/usr/lib/trebo/trebo-updater.py"
           test -x "$ROOT/usr/bin/update-manager"
           test -f "$ROOT/usr/share/applications/trebo-updater.desktop"
