@@ -46,6 +46,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xorriso squashfs-tools curl librsvg2-bin
 
+      - name: Safety-check remaster script
+        shell: bash
+        run: |
+          bash -n ./build-trebo.sh
+          if grep -nE '^[[:space:]]*apt(-get)?[[:space:]].*(remove|purge|autoremove)' ./build-trebo.sh; then
+            echo "Refusing to build: package-removal command found in remaster script."
+            exit 1
+          fi
+          if grep -nE 'mkinitramfs[[:space:]].*casper|cp[[:space:]].*trebo-live-initrd' ./build-trebo.sh; then
+            echo "Refusing to build: live/casper initramfs replacement found."
+            exit 1
+          fi
+
       - name: Build Trebo
         shell: bash
         run: |
