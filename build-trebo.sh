@@ -335,14 +335,16 @@ picture-uri='file:///usr/share/backgrounds/trebo-background.png'
 picture-options='stretched'
 
 [org/gnome/desktop/interface]
-gtk-theme='Adwaita'
+gtk-theme='Trebo'
 icon-theme='Papirus-Trebo'
 cursor-theme='Bibata-Modern-Ice'
+color-scheme='default'
 font-name='Cantarell 11'
 document-font-name='Cantarell 11'
 monospace-font-name='Monospace 11'
 
 [org/gnome/shell]
+disable-user-extensions=false
 enabled-extensions=['ubuntu-dock@ubuntu.com','ubuntu-appindicators@ubuntu.com','ding@rastersoft.com','tiling-assistant@ubuntu.com']
 
 [org/gnome/shell/extensions/dash-to-dock]
@@ -955,7 +957,7 @@ case "$action" in
     ;;
   install)
     apt-get $APT_LOCK update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get $APT_LOCK -y --no-remove upgrade
+    DEBIAN_FRONTEND=noninteractive apt-get $APT_LOCK -y --no-remove --with-new-pkgs upgrade
     dpkg --audit
     apt-get $APT_LOCK check
     printf '\nTREBO_REMAINING_UPDATES\n'
@@ -1288,17 +1290,15 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
   [[ -d /usr/share/icons/Papirus ]] && gtk-update-icon-cache -f /usr/share/icons/Papirus || true
 fi
 
-# Trebo GTK theme: use the Noble-packaged Orchis-Grey implementation (including
-# its GTK4 assets), but publish it under Trebo's own theme name.
+# Trebo GTK theme: expose Noble's packaged Orchis-Grey under the Trebo name
+# through a symlink. Unlike copying the directory, this follows future Noble
+# Orchis fixes automatically.
 [[ -d /usr/share/themes/Orchis-Grey ]] || {
   echo "Orchis-Grey GTK theme is missing." >&2
   exit 1
 }
 rm -rf /usr/share/themes/Trebo
-cp -a /usr/share/themes/Orchis-Grey /usr/share/themes/Trebo
-if [[ -f /usr/share/themes/Trebo/index.theme ]]; then
-  sed -i -E 's/^(Name=).*/\1Trebo/' /usr/share/themes/Trebo/index.theme || true
-fi
+ln -s Orchis-Grey /usr/share/themes/Trebo
 
 mkdir -p /etc/dconf/profile /etc/dconf/db/local.d
 
@@ -2036,6 +2036,15 @@ cleanup_mounts() {
 }
 trap cleanup_mounts EXIT
 
+mkdir -p "$ROOTFS/dev/pts" "$ROOTFS/proc" "$ROOTFS/sys" "$ROOTFS/run"
+
+# Recover from a previous build that was killed before its EXIT trap ran.
+umount -lf "$ROOTFS/run" 2>/dev/null || true
+umount -lf "$ROOTFS/sys" 2>/dev/null || true
+umount -lf "$ROOTFS/proc" 2>/dev/null || true
+umount -lf "$ROOTFS/dev/pts" 2>/dev/null || true
+umount -lf "$ROOTFS/dev" 2>/dev/null || true
+
 mount --bind /dev "$ROOTFS/dev"
 mount --bind /dev/pts "$ROOTFS/dev/pts"
 mount -t proc proc "$ROOTFS/proc"
@@ -2171,6 +2180,12 @@ do
 done
 
 echo "Updating filesystem manifests..."
+
+# Ubiquity exposes "Minimal installation" when this file exists. The source
+# file describes Focal, not Trebo's Noble package graph, so keeping it would
+# remove an obsolete package set from the installed system.
+rm -f "$ISO_DIR/casper/filesystem.manifest-minimal-remove"
+
 chroot "$ROOTFS" dpkg-query -W --showformat='${Package} ${Version}\n' \
   | LC_ALL=C sort > "$ISO_DIR/casper/filesystem.manifest"
 
