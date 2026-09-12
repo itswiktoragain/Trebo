@@ -20,7 +20,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 240
 
     steps:
       - name: Check out Trebo
@@ -44,12 +44,286 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y xorriso squashfs-tools curl librsvg2-bin
+          sudo apt-get install -y xorriso squashfs-tools curl librsvg2-bin initramfs-tools-core
 
       - name: Safety-check remaster script
         shell: bash
         run: |
           bash -n ./build-trebo.sh
+
+          # The main file embeds a second Bash program plus several Python
+          # programs in heredocs. Validate those too; bash -n on the outer file
+          # does not parse heredoc contents as shell/Python source.
+          awk '/^cat > .*<<.CHROOT_EOF./ {inside=1; next} /^CHROOT_EOF$/ {inside=0} inside' \
+            ./build-trebo.sh > /tmp/trebo-customize-check.sh
+          bash -n /tmp/trebo-customize-check.sh
+
+          python3 - <<'PY_STATIC'
+          from pathlib import Path
+          import re
+
+          text = Path("build-trebo.sh").read_text()
+          markers = sorted(set(re.findall(r"<<'((?:PY_)[A-Z0-9_]+)'", text)))
+          if not markers:
+              raise SystemExit("No embedded Python heredocs found")
+
+          for marker in markers:
+              opener = f"<<'{marker}'"
+              start = text.find(opener)
+              if start < 0:
+                  raise SystemExit(f"Missing opener for {marker}")
+              start = text.find("\n", start) + 1
+              end = text.find(f"\n{marker}", start)
+              if end < 0:
+                  raise SystemExit(f"Missing terminator for {marker}")
+              source = text[start:end]
+              compile(source, marker, "exec")
+              print(f"Compiled embedded Python: {marker}")
+          PY_STATIC
+
+          if grep -q '^DISTRIB_CODENAME=trebo
+            echo "Refusing to build: package-removal command found in remaster script."
+            exit 1
+          fi
+          if ! grep -Fq 'BOOT=casper update-initramfs -c -k "$KVER"' ./build-trebo.sh; then
+            echo "Refusing to build: Linux 7 initrd is not explicitly built in Casper mode."
+            exit 1
+          fi
+          if ! grep -Fq "grep -Fx 'scripts/casper'" ./build-trebo.sh; then
+            echo "Refusing to build: generated Linux 7 initrd is not checked for scripts/casper."
+            exit 1
+          fi
+          if ! grep -Fq 'cp "$ROOTFS/boot/vmlinuz-$KVER" "$ISO_DIR/casper/vmlinuz"' ./build-trebo.sh; then
+            echo "Refusing to build: ISO is not wired to boot Linux 7."
+            exit 1
+          fi
+
+      - name: Build Trebo
+        shell: bash
+        run: |
+          sudo bash ./build-trebo.sh
+
+      - name: Re-run quick mode for idempotence
+        shell: bash
+        run: |
+          sudo bash ./build-trebo.sh --quick
+
+      - name: Verify output and rootfs invariants
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          sha256sum -c Trebo-20.04.6-amd64.iso.sha256
+          xorriso -indev Trebo-20.04.6-amd64.iso -report_el_torito plain
+          ls -lh Trebo-20.04.6-amd64.iso Trebo-20.04.6-amd64.iso.sha256
+
+          ROOT=trebo-work/rootfs
+          ISO=trebo-work/iso
+
+          test -x "$ROOT/usr/lib/ubiquity/target-config/99trebo-installed"
+          test -x "$ROOT/usr/lib/trebo/trebo-updater.py"
+          test -x "$ROOT/usr/bin/update-manager"
+          test "$(sudo chroot "$ROOT" dpkg-divert --listpackage /usr/bin/update-manager)" = "LOCAL"
+          test ! -e "$ROOT/etc/initramfs-tools/conf.d/trebo-live"
+          test ! -s "$ROOT/etc/machine-id"
+          test -L "$ROOT/etc/resolv.conf"
+          test "$(readlink "$ROOT/etc/resolv.conf")" = "../run/systemd/resolve/stub-resolv.conf"
+          grep -q '^DISTRIB_CODENAME=noble
+      - name: Upload Trebo ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trebo-20.04.6-amd64
+          path: |
+            Trebo-20.04.6-amd64.iso
+            Trebo-20.04.6-amd64.iso.sha256
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+ ./build-trebo.sh; then
+            echo "Refusing to build: Ubiquity would treat nonexistent Trebo as the Ubuntu archive suite."
+            exit 1
+          fi
+          if ! grep -q '^DISTRIB_CODENAME=noble
+            echo "Refusing to build: package-removal command found in remaster script."
+            exit 1
+          fi
+          if ! grep -Fq 'BOOT=casper update-initramfs -c -k "$KVER"' ./build-trebo.sh; then
+            echo "Refusing to build: Linux 7 initrd is not explicitly built in Casper mode."
+            exit 1
+          fi
+          if ! grep -Fq "grep -Fx 'scripts/casper'" ./build-trebo.sh; then
+            echo "Refusing to build: generated Linux 7 initrd is not checked for scripts/casper."
+            exit 1
+          fi
+          if ! grep -Fq 'cp "$ROOTFS/boot/vmlinuz-$KVER" "$ISO_DIR/casper/vmlinuz"' ./build-trebo.sh; then
+            echo "Refusing to build: ISO is not wired to boot Linux 7."
+            exit 1
+          fi
+
+      - name: Build Trebo
+        shell: bash
+        run: |
+          sudo bash ./build-trebo.sh
+
+      - name: Verify output
+        shell: bash
+        run: |
+          sha256sum -c Trebo-20.04.6-amd64.iso.sha256
+          xorriso -indev Trebo-20.04.6-amd64.iso -report_el_torito plain
+          ls -lh Trebo-20.04.6-amd64.iso Trebo-20.04.6-amd64.iso.sha256
+
+      - name: Upload Trebo ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trebo-20.04.6-amd64
+          path: |
+            Trebo-20.04.6-amd64.iso
+            Trebo-20.04.6-amd64.iso.sha256
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+ ./build-trebo.sh; then
+            echo "Refusing to build: Noble archive codename guard is missing."
+            exit 1
+          fi
+
+          if grep -nE '^[[:space:]]*apt(-get)?[[:space:]].*(remove|purge|autoremove)' ./build-trebo.sh; then
+            echo "Refusing to build: package-removal command found in remaster script."
+            exit 1
+          fi
+          if ! grep -Fq 'BOOT=casper update-initramfs -c -k "$KVER"' ./build-trebo.sh; then
+            echo "Refusing to build: Linux 7 initrd is not explicitly built in Casper mode."
+            exit 1
+          fi
+          if ! grep -Fq "grep -Fx 'scripts/casper'" ./build-trebo.sh; then
+            echo "Refusing to build: generated Linux 7 initrd is not checked for scripts/casper."
+            exit 1
+          fi
+          if ! grep -Fq 'cp "$ROOTFS/boot/vmlinuz-$KVER" "$ISO_DIR/casper/vmlinuz"' ./build-trebo.sh; then
+            echo "Refusing to build: ISO is not wired to boot Linux 7."
+            exit 1
+          fi
+
+      - name: Build Trebo
+        shell: bash
+        run: |
+          sudo bash ./build-trebo.sh
+
+      - name: Verify output
+        shell: bash
+        run: |
+          sha256sum -c Trebo-20.04.6-amd64.iso.sha256
+          xorriso -indev Trebo-20.04.6-amd64.iso -report_el_torito plain
+          ls -lh Trebo-20.04.6-amd64.iso Trebo-20.04.6-amd64.iso.sha256
+
+      - name: Upload Trebo ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trebo-20.04.6-amd64
+          path: |
+            Trebo-20.04.6-amd64.iso
+            Trebo-20.04.6-amd64.iso.sha256
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+ "$ROOT/etc/lsb-release"
+          grep -Fq "trebo.html" "$ROOT/usr/lib/ubiquity/ubiquity/frontend/gtk_ui.py"
+          grep -Fq "installer-startup.ogg" "$ROOT/usr/lib/ubiquity/ubiquity/frontend/gtk_ui.py"
+          grep -Fq "Install Trebo Linux" "$ROOT/usr/share/ubiquity/gtk/ubiquity.ui"
+
+          for ext in \
+            ubuntu-dock@ubuntu.com \
+            ubuntu-appindicators@ubuntu.com \
+            ding@rastersoft.com \
+            tiling-assistant@ubuntu.com
+          do
+            test -d "$ROOT/usr/share/gnome-shell/extensions/$ext"
+          done
+
+          grep -q '^casper ' "$ISO/casper/filesystem.manifest-remove"
+          grep -q '^ubiquity ' "$ISO/casper/filesystem.manifest-remove"
+
+          test -f "$ISO/casper/initrd"
+          lsinitramfs "$ISO/casper/initrd" > /tmp/trebo-initrd.list
+          grep -Fxq 'scripts/casper' /tmp/trebo-initrd.list
+          grep -Fq 'usr/share/plymouth/themes/trebo/trebo.plymouth' /tmp/trebo-initrd.list
+
+          found_casper_boot=0
+          while IFS= read -r boot_file; do
+            [[ -f "$boot_file" ]] || continue
+            if grep -q 'boot=casper' "$boot_file"; then
+              found_casper_boot=1
+              if grep 'boot=casper' "$boot_file" | grep -vqE '(^|[[:space:]])noprompt([[:space:]]|$)'; then
+                echo "Casper boot entry without noprompt: $boot_file"
+                exit 1
+              fi
+            fi
+          done < <(printf '%s\n' \
+            "$ISO/boot/grub/grub.cfg" \
+            "$ISO/boot/grub/loopback.cfg" \
+            "$ISO/isolinux/txt.cfg" \
+            "$ISO/isolinux/menu.cfg" \
+            "$ISO/isolinux/isolinux.cfg")
+          test "$found_casper_boot" -eq 1
+
+      - name: Upload Trebo ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trebo-20.04.6-amd64
+          path: |
+            Trebo-20.04.6-amd64.iso
+            Trebo-20.04.6-amd64.iso.sha256
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+ ./build-trebo.sh; then
+            echo "Refusing to build: Ubiquity would treat nonexistent Trebo as the Ubuntu archive suite."
+            exit 1
+          fi
+          if ! grep -q '^DISTRIB_CODENAME=noble
+            echo "Refusing to build: package-removal command found in remaster script."
+            exit 1
+          fi
+          if ! grep -Fq 'BOOT=casper update-initramfs -c -k "$KVER"' ./build-trebo.sh; then
+            echo "Refusing to build: Linux 7 initrd is not explicitly built in Casper mode."
+            exit 1
+          fi
+          if ! grep -Fq "grep -Fx 'scripts/casper'" ./build-trebo.sh; then
+            echo "Refusing to build: generated Linux 7 initrd is not checked for scripts/casper."
+            exit 1
+          fi
+          if ! grep -Fq 'cp "$ROOTFS/boot/vmlinuz-$KVER" "$ISO_DIR/casper/vmlinuz"' ./build-trebo.sh; then
+            echo "Refusing to build: ISO is not wired to boot Linux 7."
+            exit 1
+          fi
+
+      - name: Build Trebo
+        shell: bash
+        run: |
+          sudo bash ./build-trebo.sh
+
+      - name: Verify output
+        shell: bash
+        run: |
+          sha256sum -c Trebo-20.04.6-amd64.iso.sha256
+          xorriso -indev Trebo-20.04.6-amd64.iso -report_el_torito plain
+          ls -lh Trebo-20.04.6-amd64.iso Trebo-20.04.6-amd64.iso.sha256
+
+      - name: Upload Trebo ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trebo-20.04.6-amd64
+          path: |
+            Trebo-20.04.6-amd64.iso
+            Trebo-20.04.6-amd64.iso.sha256
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+ ./build-trebo.sh; then
+            echo "Refusing to build: Noble archive codename guard is missing."
+            exit 1
+          fi
+
           if grep -nE '^[[:space:]]*apt(-get)?[[:space:]].*(remove|purge|autoremove)' ./build-trebo.sh; then
             echo "Refusing to build: package-removal command found in remaster script."
             exit 1
