@@ -63,6 +63,14 @@ rsvg-convert -w 1156 -h 867   -o "$ROOTFS/tmp/trebo-assets/background.png"   "$S
 rsvg-convert -w 507 -h 444   -o "$ROOTFS/tmp/trebo-assets/logo.png"   "$SCRIPT_DIR/assets/logo.svg"
 install -m0644 "$SCRIPT_DIR/assets/trebo-symbolic.svg" "$ROOTFS/tmp/trebo-assets/trebo-symbolic.svg"
 
+# Ubiquity's chrome expects a small logo, not the full 507x444 artwork. Render
+# a compact dark logo for its light installer header/panel.
+sed 's/currentColor/#202020/g' "$SCRIPT_DIR/assets/trebo-symbolic.svg" \
+  > "$ROOTFS/tmp/trebo-assets/trebo-installer-logo.svg"
+rsvg-convert -w 64 -h 56 \
+  -o "$ROOTFS/tmp/trebo-assets/trebo-installer-logo.png" \
+  "$ROOTFS/tmp/trebo-assets/trebo-installer-logo.svg"
+
 cat > "$ROOTFS/tmp/trebo-customize.sh" <<'CHROOT_EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -79,6 +87,21 @@ remove_obsolete_lupin_casper() {
       return 1
     fi
     dpkg --remove lupin-casper
+  fi
+}
+
+remove_exact_optional_package() {
+  local pkg="$1"
+
+  if ! dpkg-query -W -f='${db:Status-Status}\n' "$pkg" 2>/dev/null | grep -Fx installed >/dev/null; then
+    return 0
+  fi
+
+  if dpkg --no-act --remove "$pkg" >/dev/null 2>&1; then
+    echo "Removing optional package: $pkg"
+    dpkg --remove "$pkg"
+  else
+    echo "Keeping $pkg because another installed package requires it."
   fi
 }
 
@@ -130,23 +153,31 @@ upgrade_to_suite() {
 
 install_final_desktop() {
   echo 'gdm3 shared/default-x-display-manager select gdm3' | debconf-set-selections
+
+  # Re-establish Canonical's supported Noble desktop core. --no-install-recommends
+  # avoids pulling the optional Ubuntu wallpaper/Yaru recommendation bundle,
+  # while still installing the session, PipeWire, portals, dock and desktop
+  # services that GNOME expects to have together.
   apt-get install -y --no-install-recommends \
-    gdm3 \
-    gnome-shell \
-    gnome-session \
-    gnome-control-center \
-    gnome-terminal \
-    nautilus \
-    gnome-settings-daemon \
+    ubuntu-desktop-minimal \
     gnome-tweaks \
-    adwaita-icon-theme \
-    fonts-cantarell \
     plymouth \
     plymouth-label \
     plymouth-theme-spinner \
-    gnome-shell-extension-ubuntu-dock \
     papirus-icon-theme \
-    bibata-cursor-theme
+    bibata-cursor-theme \
+    orchis-gtk-theme \
+    qt5-gtk-platformtheme \
+    qt6-gtk-platformtheme \
+    gnome-software \
+    gparted \
+    vlc \
+    baobab \
+    file-roller
+
+  dpkg --configure -a
+  apt-get -f install -y
+  apt-get check
 }
 
 if [[ "${TREBO_RESUME_AFTER_UPGRADE:-0}" != "1" ]]; then
@@ -659,9 +690,20 @@ EOF_LSB
 printf 'Trebo Linux 1.0 \\n \\l\n' > /etc/issue
 printf 'Trebo Linux 1.0\n' > /etc/issue.net
 
-# Remove only visible Ubuntu session/desktop payloads from the finished image.
-# No package database operation is used here.
-rm -f   /usr/share/xsessions/ubuntu.desktop   /usr/share/xsessions/ubuntu-xorg.desktop   /usr/share/wayland-sessions/ubuntu.desktop   /usr/share/wayland-sessions/ubuntu-wayland.desktop
+# Keep Noble's Ubuntu GNOME session machinery because it wires the supported
+# dock/portal/session pieces together. Rebrand only the chooser-visible names.
+for session_file in \
+  /usr/share/xsessions/ubuntu.desktop \
+  /usr/share/xsessions/ubuntu-xorg.desktop \
+  /usr/share/wayland-sessions/ubuntu.desktop \
+  /usr/share/wayland-sessions/ubuntu-wayland.desktop
+do
+  [[ -f "$session_file" ]] || continue
+  sed -i -E \
+    -e 's/^Name=.*/Name=Trebo/' \
+    -e 's/^Comment=.*/Comment=Trebo Linux desktop session/' \
+    "$session_file"
+done
 
 # Keep Noble's Ubuntu Dock extension: Trebo uses it for the left-side dock and
 # replaces the Show Applications glyph with the Trebo logo.
@@ -669,6 +711,28 @@ rm -f   /usr/share/xsessions/ubuntu.desktop   /usr/share/xsessions/ubuntu-xorg.d
   echo "Ubuntu Dock extension is missing after installation." >&2
   exit 1
 }
+
+# Force the Show Applications actor to use Trebo's SVG directly instead of
+# relying on the current icon theme's stock 3x3 grid symbol.
+DOCK_APPICONS=/usr/share/gnome-shell/extensions/ubuntu-dock@ubuntu.com/appIcons.js
+[[ -f "$DOCK_APPICONS" ]] || {
+  echo "Ubuntu Dock appIcons.js is missing." >&2
+  exit 1
+}
+python3 - "$DOCK_APPICONS" <<'PY_DOCK_ICON'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+needle = "this._iconActor.iconName = `view-app-grid-${Main.sessionMode.currentMode}-symbolic`;"
+replacement = """this._iconActor.iconName = null;
+        this._iconActor.gicon = Gio.Icon.new_for_string('/usr/share/icons/hicolor/scalable/apps/trebo-symbolic.svg');"""
+if needle not in text:
+    raise SystemExit("Ubuntu Dock Show Apps icon assignment was not found")
+path.write_text(text.replace(needle, replacement, 1))
+print("Patched Ubuntu Dock Show Applications icon to Trebo.")
+PY_DOCK_ICON
 
 find /usr/share/backgrounds -maxdepth 2 -type f   \( -iname '*ubuntu*' -o -iname '*focal*' \)   -delete 2>/dev/null || true
 
@@ -682,6 +746,8 @@ done < <(
 
 install -Dm0644 /tmp/trebo-assets/background.png   /usr/share/backgrounds/trebo-background.png
 install -Dm0644 /tmp/trebo-assets/logo.png   /usr/share/pixmaps/trebo-logo.png
+install -Dm0644 /tmp/trebo-assets/trebo-symbolic.svg \
+  /usr/share/icons/hicolor/scalable/apps/trebo-symbolic.svg
 
 
 # ---------------------------------------------------------------------------
@@ -748,9 +814,35 @@ do
     "$TREBO_ICONS/symbolic/places/$icon_name.svg"
 done
 
-# Yaru's package may be a dependency of Ubuntu metapackages, so do not apt
-# remove it and risk another dependency cascade. Remove only its icon payload
-# from the finished image; Papirus-Trebo is the configured icon theme.
+# Remove Yaru ICONS as an exact package operation. dpkg --no-act guarantees
+# this cannot expand into an autoremove/dependency cascade.
+remove_exact_optional_package yaru-theme-icon
+remove_exact_optional_package libreoffice-style-yaru
+
+# Remove the old games inherited from the 20.04 desktop image. Each package is
+# removed only when dpkg proves nothing installed requires it.
+for game_pkg in \
+  aisleriot \
+  gnome-chess \
+  gnome-mahjongg \
+  gnome-mines \
+  gnome-nibbles \
+  gnome-robots \
+  gnome-sudoku \
+  gnome-taquin \
+  gnome-tetravex \
+  iagno \
+  lightsoff \
+  quadrapassel \
+  swell-foop \
+  tali \
+  five-or-more \
+  four-in-a-row
+do
+  remove_exact_optional_package "$game_pkg"
+done
+
+# A leftover Yaru icon directory must not win icon lookup.
 find /usr/share/icons -mindepth 1 -maxdepth 1 -type d -name 'Yaru*' \
   -exec rm -rf {} + 2>/dev/null || true
 
@@ -777,17 +869,72 @@ picture-uri='file:///usr/share/backgrounds/trebo-background.png'
 picture-options='stretched'
 
 [org/gnome/desktop/interface]
-gtk-theme='Adwaita'
-icon-theme='Adwaita'
+gtk-theme='Orchis-Grey'
+icon-theme='Papirus-Trebo'
+cursor-theme='Bibata-Modern-Ice'
+color-scheme='default'
 font-name='Cantarell 11'
 document-font-name='Cantarell 11'
 monospace-font-name='Monospace 11'
 
 [org/gnome/shell]
-enabled-extensions=@as []
+disable-user-extensions=false
+enabled-extensions=['ubuntu-dock@ubuntu.com']
+
+[org/gnome/shell/extensions/dash-to-dock]
+dock-position='LEFT'
+dock-fixed=true
+autohide=false
+intellihide=false
+extend-height=true
+show-show-apps-button=true
+show-apps-at-top=false
+dash-max-icon-size=48
 EOF_DCONF
 
+# Ubuntu ships lower-numbered schema overrides that default back to Yaru.
+# A 99_ Trebo override makes new live/installed accounts inherit Trebo's
+# theme and dock even before their personal dconf database exists.
+cat > /usr/share/glib-2.0/schemas/99_trebo.gschema.override <<'EOF_TREBO_SCHEMA'
+[org.gnome.desktop.interface]
+gtk-theme='Orchis-Grey'
+icon-theme='Papirus-Trebo'
+cursor-theme='Bibata-Modern-Ice'
+color-scheme='default'
+
+[org.gnome.shell]
+disable-user-extensions=false
+enabled-extensions=['ubuntu-dock@ubuntu.com']
+
+[org.gnome.shell.extensions.dash-to-dock]
+dock-position='LEFT'
+dock-fixed=true
+autohide=false
+intellihide=false
+extend-height=true
+show-show-apps-button=true
+show-apps-at-top=false
+dash-max-icon-size=48
+EOF_TREBO_SCHEMA
+
+glib-compile-schemas /usr/share/glib-2.0/schemas
 dconf update
+
+rm -f /etc/skel/.config/dconf/user /root/.config/dconf/user 2>/dev/null || true
+
+# Qt 5 and Qt 6 use Ubuntu's supported GTK3 platform bridges and therefore
+# follow Trebo's Orchis GTK theme instead of their mismatched stock styles.
+mkdir -p /etc/profile.d
+cat > /etc/profile.d/trebo-qt-theme.sh <<'EOF_TREBO_QT'
+export QT_QPA_PLATFORMTHEME=gtk3
+EOF_TREBO_QT
+chmod 0644 /etc/profile.d/trebo-qt-theme.sh
+
+if grep -q '^QT_QPA_PLATFORMTHEME=' /etc/environment 2>/dev/null; then
+  sed -i 's/^QT_QPA_PLATFORMTHEME=.*/QT_QPA_PLATFORMTHEME=gtk3/' /etc/environment
+else
+  printf '\nQT_QPA_PLATFORMTHEME=gtk3\n' >> /etc/environment
+fi
 
 # Replace the Ubiquity slideshow with the Trebo installation screen.
 SLIDES=/usr/share/ubiquity-slideshow/slides
@@ -835,13 +982,15 @@ JSONP({"slides":["index.html"]});
 EOF_DIRECTORY
 fi
 
-# Replace installer artwork where those files exist.
-for installer_art in   /usr/share/ubiquity/pixmaps/ubuntu_installed.png   /usr/share/ubiquity/pixmaps/ubuntu-logo.png
-do
-  if [[ -e "$installer_art" ]]; then
-    cp /tmp/trebo-assets/logo.png "$installer_art"
-  fi
-done
+# Replace only Ubiquity's small logo with a correctly sized dark Trebo mark.
+# The old build copied a 507x444 white image into both artwork slots.
+if [[ -e /usr/share/ubiquity/pixmaps/ubuntu-logo.png ]]; then
+  install -m0644 /tmp/trebo-assets/trebo-installer-logo.png \
+    /usr/share/ubiquity/pixmaps/ubuntu-logo.png
+fi
+
+# The slideshow is fully replaced above, so do not overwrite
+# ubuntu_installed.png with an unrelated oversized image.
 
 # Replace obvious user-facing Ubuntu text in Ubiquity UI definitions.
 for ui_file in /usr/share/ubiquity/gtk/*.ui; do
@@ -968,6 +1117,40 @@ echo "Verified Linux 7 initramfs contains Casper and Trebo Plymouth."
 rm -f "$INITRD_LIST"
 
 echo "Final Trebo live kernel: $KVER"
+
+# Do not ship crash reports generated while upgrading packages inside chroot;
+# they trigger bogus first-boot "System program problem detected" dialogs.
+rm -rf /var/crash/* 2>/dev/null || true
+
+dpkg --configure -a
+apt-get -f install -y
+apt-get check
+
+AUDIT_OUTPUT="$(dpkg --audit || true)"
+if [[ -n "$AUDIT_OUTPUT" ]]; then
+  echo "dpkg audit is not clean:" >&2
+  printf '%s\n' "$AUDIT_OUTPUT" >&2
+  exit 1
+fi
+
+for pkg in \
+  ubuntu-desktop-minimal \
+  ubuntu-session \
+  gnome-shell \
+  gdm3 \
+  pipewire-pulse \
+  wireplumber \
+  xdg-desktop-portal-gnome \
+  gnome-shell-extension-ubuntu-dock \
+  papirus-icon-theme \
+  bibata-cursor-theme \
+  orchis-gtk-theme
+do
+  [[ "$(dpkg-query -W -f='${db:Status-Status}' "$pkg" 2>/dev/null || true)" == "installed" ]] || {
+    echo "Required final Trebo package is not fully installed: $pkg" >&2
+    exit 1
+  }
+done
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
