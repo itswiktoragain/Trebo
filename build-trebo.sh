@@ -1727,7 +1727,7 @@ method = r'''    def start_slideshow(self):
             details.set_name('trebo-install-details')
 
         provider = Gtk.CssProvider()
-        provider.load_from_data(b'''
+        provider.load_from_data(b"""
 #trebo-install-panel {
     background-color: rgba(20, 20, 20, 0.58);
     border-radius: 14px;
@@ -1748,7 +1748,7 @@ method = r'''    def start_slideshow(self):
     color: #ffffff;
     -gtk-icon-shadow: none;
 }
-''')
+""")
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(),
             provider,
