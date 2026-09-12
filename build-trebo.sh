@@ -732,44 +732,37 @@ PY_UBIQUITY_TEST
 # ---------------------------------------------------------------------------
 # LIVE-BOOT INTEGRITY
 # ---------------------------------------------------------------------------
-# The rootfs is now Noble-based (or a resumed Noble work tree). Refresh Casper
-# from the final repositories so its initramfs scripts match the final
-# initramfs-tools version. This is intentionally done AFTER the kernel-first
-# stage and the release transitions.
-apt-mark unhold casper 2>/dev/null || true
-apt-get update
-
-# Focal's old Wubi helper, lupin-casper, owns
-# /usr/share/initramfs-tools/scripts/casper-premount/20iso_scan.
-# Modern Casper owns that file itself, so leaving lupin-casper installed makes
-# dpkg abort the Casper upgrade with a file-ownership collision.
-#
-# Do NOT use apt remove/purge here: that could expand into dependency changes.
-# dpkg --no-act verifies that removing this exact obsolete Wubi helper is safe,
-# and dpkg --remove then removes ONLY that package.
-remove_obsolete_lupin_casper
-
-# A previous interrupted Casper unpack can leave dpkg's status database in a
-# partial state. Reinstall the single target package directly from the current
-# Noble archive rather than asking apt to perform a broad dependency repair.
-casper_simulation="$(mktemp)"
-apt-get -s install --reinstall casper > "$casper_simulation"
-for critical in ubiquity ubiquity-frontend-gtk systemd initramfs-tools gdm3 gnome-shell; do
-  if awk '$1 == "Remv" {print $2}' "$casper_simulation" | grep -Fx "$critical" >/dev/null; then
-    echo "Refusing Casper refresh because apt wants to remove critical package: $critical" >&2
-    cat "$casper_simulation" >&2
-    rm -f "$casper_simulation"
-    exit 1
-  fi
-done
-rm -f "$casper_simulation"
-
-if [[ "${TREBO_QUICK:-0}" == "1" ]] && \
-   [[ "$(dpkg-query -W -f='${db:Status-Status}' casper 2>/dev/null || true)" == "installed" ]] && \
+# The rootfs is now Noble-based (or a resumed Noble work tree). Full/resume
+# builds refresh Casper from Noble. Quick mode avoids even the APT refresh when
+# the existing Casper package and its initramfs files are already healthy.
+CASPER_HEALTHY=0
+if [[ "$(dpkg-query -W -f='${db:Status-Status}' casper 2>/dev/null || true)" == "installed" ]] && \
    [[ -f /usr/share/initramfs-tools/scripts/casper ]] && \
    [[ -f /usr/share/initramfs-tools/hooks/casper ]]; then
-  echo "QUICK MODE: existing Casper is healthy; skipping its reinstall."
+  CASPER_HEALTHY=1
+fi
+
+if [[ "${TREBO_QUICK:-0}" == "1" && "$CASPER_HEALTHY" == "1" ]]; then
+  echo "QUICK MODE: existing Casper is healthy; skipping all Casper APT work."
 else
+  apt-mark unhold casper 2>/dev/null || true
+  apt-get update
+
+  # Focal's obsolete lupin-casper owns 20iso_scan; modern Casper owns it itself.
+  remove_obsolete_lupin_casper
+
+  casper_simulation="$(mktemp)"
+  apt-get -s install --reinstall casper > "$casper_simulation"
+  for critical in ubiquity ubiquity-frontend-gtk systemd initramfs-tools gdm3 gnome-shell; do
+    if awk '$1 == "Remv" {print $2}' "$casper_simulation" | grep -Fx "$critical" >/dev/null; then
+      echo "Refusing Casper refresh because apt wants to remove critical package: $critical" >&2
+      cat "$casper_simulation" >&2
+      rm -f "$casper_simulation"
+      exit 1
+    fi
+  done
+  rm -f "$casper_simulation"
+
   apt-get install -y --reinstall --no-install-recommends casper
 fi
 
