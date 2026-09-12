@@ -225,22 +225,16 @@ apt-get install -y --no-install-recommends \
   plymouth-label \
   plymouth-theme-spinner
 
-# Rebuild the Linux 7 initramfs with the final userspace/initramfs tools.
+# The final Linux 7 initramfs is deliberately rebuilt later, after the
+# Trebo Plymouth theme is installed and selected. Rebuilding it here would
+# embed Ubuntu's Plymouth theme into early userspace and cause a brief Ubuntu
+# splash before Trebo takes over.
 KVER="$(cat /tmp/trebo-kernel-version)"
-update-initramfs -u -k "$KVER"
-
-# This is the important live-boot safety check. The ISO is allowed to replace
-# casper/vmlinuz+initrd only when the new initrd really contains Casper.
-if ! lsinitramfs "/boot/initrd.img-$KVER" | grep -qE '(^|/)scripts/casper(/|$)'; then
-  echo "Linux 7 initramfs does not contain Casper; refusing to create a broken ISO." >&2
-  exit 1
-fi
 
 [[ -f "/boot/vmlinuz-$KVER" ]] || {
   echo "Linux 7 kernel disappeared during the userspace upgrade." >&2
   exit 1
 }
-echo "Final Trebo live kernel: $KVER"
 
 # Rebrand the final Noble-based userspace as Trebo.
 cat > /usr/lib/os-release <<'EOF_OS_RELEASE'
@@ -432,8 +426,33 @@ if [[ -f /sbin/casper-stop ]]; then
   sed -i -E     's|^MSG=.*$|MSG="Please remove media"|; s|^MSG_FALLBACK=.*$|MSG_FALLBACK="Please remove media"|'     /sbin/casper-stop
 fi
 
-# The Linux 7 initramfs was already rebuilt and Casper-validated above.
-# Do not regenerate it again here.
+# IMPORTANT: build the live Linux 7 initramfs only AFTER Trebo's Plymouth
+# theme has been installed and made the default. The initramfs is the first
+# userspace visible during boot. If it contains Ubuntu's default Plymouth
+# theme, the machine briefly shows Ubuntu and only switches to Trebo after the
+# real root filesystem mounts.
+KVER="$(cat /tmp/trebo-kernel-version)"
+echo "Rebuilding Linux 7 initramfs with Trebo Plymouth embedded..."
+update-initramfs -u -k "$KVER"
+
+# Refuse to publish an ISO unless the live initramfs has both Casper and the
+# Trebo Plymouth assets. This catches the exact Ubuntu-then-Trebo regression.
+if ! lsinitramfs "/boot/initrd.img-$KVER" | grep -qE '(^|/)scripts/casper(/|$)'; then
+  echo "Linux 7 initramfs does not contain Casper; refusing to create a broken ISO." >&2
+  exit 1
+fi
+
+if ! lsinitramfs "/boot/initrd.img-$KVER" | grep -q 'usr/share/plymouth/themes/trebo/trebo.plymouth'; then
+  echo "Linux 7 initramfs does not contain the Trebo Plymouth theme." >&2
+  exit 1
+fi
+
+if ! lsinitramfs "/boot/initrd.img-$KVER" | grep -q 'usr/share/plymouth/themes/trebo/background.png'; then
+  echo "Linux 7 initramfs does not contain the Trebo Plymouth background." >&2
+  exit 1
+fi
+
+echo "Final Trebo live kernel: $KVER"
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
