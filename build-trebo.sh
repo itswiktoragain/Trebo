@@ -126,7 +126,9 @@ else
 fi
 
 # Recreate assets even during resume so the working tree always uses the
-# current repository versions.
+# current repository versions. Also discard any stale temporary live initrd
+# left by a hard-killed previous build; a new one is created when requested.
+rm -f "$ROOTFS/tmp"/trebo-live-initrd-* 2>/dev/null || true
 mkdir -p "$ROOTFS/tmp/trebo-assets"
 rsvg-convert -w 1156 -h 867   -o "$ROOTFS/tmp/trebo-assets/background.png"   "$SCRIPT_DIR/assets/background.svg"
 rsvg-convert -w 507 -h 444   -o "$ROOTFS/tmp/trebo-assets/logo.png"   "$SCRIPT_DIR/assets/logo.svg"
@@ -1692,6 +1694,13 @@ TARGET=/target
 [ -d "$TARGET" ] || exit 0
 
 rm -f "$TARGET/etc/initramfs-tools/conf.d/trebo-live"
+if [ -f "$TARGET/etc/initramfs-tools/initramfs.conf" ]; then
+  if grep -q '^BOOT=' "$TARGET/etc/initramfs-tools/initramfs.conf"; then
+    sed -i 's/^BOOT=.*/BOOT=local/' "$TARGET/etc/initramfs-tools/initramfs.conf"
+  else
+    printf '\nBOOT=local\n' >> "$TARGET/etc/initramfs-tools/initramfs.conf"
+  fi
+fi
 rm -f "$TARGET/etc/systemd/system/trebo-casper-noprompt.service"
 rm -f "$TARGET/etc/systemd/system/multi-user.target.wants/trebo-casper-noprompt.service"
 rm -f "$TARGET/var/lib/systemd/random-seed"
@@ -1895,6 +1904,11 @@ fi
 # system initrd. Ubiquity's target hook performs the same repair again after
 # installation as a second line of defence.
 rm -f /etc/initramfs-tools/conf.d/trebo-live
+if grep -q '^BOOT=' /etc/initramfs-tools/initramfs.conf; then
+  sed -i 's/^BOOT=.*/BOOT=local/' /etc/initramfs-tools/initramfs.conf
+else
+  printf '\nBOOT=local\n' >> /etc/initramfs-tools/initramfs.conf
+fi
 
 if [[ "${TREBO_QUICK:-0}" != "1" || "${TREBO_REFRESH_INITRD:-0}" == "1" ]]; then
   echo "Rebuilding rootfs Linux 7 initramfs for normal installed-system boot..."
@@ -1975,6 +1989,10 @@ done
 # expensive SquashFS stage.
 [[ ! -e /etc/initramfs-tools/conf.d/trebo-live ]] || {
   echo "Live-only initramfs config leaked into the reusable rootfs." >&2
+  exit 1
+}
+grep -q '^BOOT=local$' /etc/initramfs-tools/initramfs.conf || {
+  echo "Reusable rootfs is not configured for normal local-root initramfs boot." >&2
   exit 1
 }
 if [[ "${TREBO_QUICK:-0}" != "1" || "${TREBO_REFRESH_INITRD:-0}" == "1" ]]; then
