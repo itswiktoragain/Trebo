@@ -131,6 +131,7 @@ mkdir -p "$ROOTFS/tmp/trebo-assets"
 rsvg-convert -w 1156 -h 867   -o "$ROOTFS/tmp/trebo-assets/background.png"   "$SCRIPT_DIR/assets/background.svg"
 rsvg-convert -w 507 -h 444   -o "$ROOTFS/tmp/trebo-assets/logo.png"   "$SCRIPT_DIR/assets/logo.svg"
 install -m0644 "$SCRIPT_DIR/assets/trebo-symbolic.svg" "$ROOTFS/tmp/trebo-assets/trebo-symbolic.svg"
+install -m0644 "$SCRIPT_DIR/assets/installer-startup.ogg" "$ROOTFS/tmp/trebo-assets/installer-startup.ogg"
 
 # Ubiquity's chrome expects a small logo, not the full 507x444 artwork. Render
 # a compact dark logo for its light installer header/panel.
@@ -240,6 +241,7 @@ install_customization_packages() {
     vlc
     baobab
     file-roller
+    gnome-session-canberra
   )
   local missing=()
   local pkg
@@ -1085,6 +1087,118 @@ else
   printf '\nQT_QPA_PLATFORMTHEME=gtk3\n' >> /etc/environment
 fi
 
+# ---------------------------------------------------------------------------
+# TREBO UBIQUITY AUDIO + COMPLETION DIALOG
+# ---------------------------------------------------------------------------
+install -Dm0644 /tmp/trebo-assets/installer-startup.ogg   /usr/share/sounds/trebo/stereo/installer-startup.ogg
+
+# Ubiquity's GTK frontend waits for sound.target and normally launches
+# canberra-gtk-play with the generic "system-ready" event. Point that one
+# installer-only event at Trebo's supplied audio file instead, so changing the
+# installer sound does not replace the normal desktop login/event sounds.
+UBIQUITY_GTK=/usr/lib/ubiquity/ubiquity/frontend/gtk_ui.py
+[[ -f "$UBIQUITY_GTK" ]] || {
+  echo "Ubiquity GTK frontend file is missing: $UBIQUITY_GTK" >&2
+  exit 1
+}
+python3 - "$UBIQUITY_GTK" <<'PY_TREBO_UBIQUITY_AUDIO'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+replacement = "['canberra-gtk-play', '--file=/usr/share/sounds/trebo/stereo/installer-startup.ogg']"
+
+patterns = [
+    r"\['canberra-gtk-play',\s*'--id=system-ready'\]",
+    r'\["canberra-gtk-play",\s*"--id=system-ready"\]',
+]
+
+changed = False
+for pattern in patterns:
+    text, count = re.subn(pattern, replacement, text, count=1)
+    if count:
+        changed = True
+        break
+
+# Quick mode may run against a tree already patched by an earlier quick build.
+if not changed and "installer-startup.ogg" not in text:
+    raise SystemExit("Could not locate Ubiquity's system-ready sound command")
+
+path.write_text(text)
+PY_TREBO_UBIQUITY_AUDIO
+
+command -v canberra-gtk-play >/dev/null || {
+  echo "canberra-gtk-play is missing even though gnome-session-canberra should provide it." >&2
+  exit 1
+}
+
+# Fix the actual final Ubiquity dialog rather than abusing
+# ubuntu_installed.png. That pixmap belongs to the first language/choice page.
+# Keep the completion dialog compact, give it a normal-sized symbolic Trebo
+# icon, and use short Trebo-specific completion text.
+UBIQUITY_UI=/usr/share/ubiquity/gtk/ubiquity.ui
+[[ -f "$UBIQUITY_UI" ]] || {
+  echo "Ubiquity main GTK UI is missing: $UBIQUITY_UI" >&2
+  exit 1
+}
+python3 - "$UBIQUITY_UI" <<'PY_TREBO_FINISHED_DIALOG'
+from pathlib import Path
+import xml.etree.ElementTree as ET
+import sys
+
+path = Path(sys.argv[1])
+tree = ET.parse(path)
+root = tree.getroot()
+
+def prop(obj, name, value):
+    for node in obj.findall("property"):
+        if node.get("name") == name:
+            node.text = value
+            return
+    node = ET.SubElement(obj, "property", {"name": name})
+    node.text = value
+
+finished = root.find(".//object[@id='finished_dialog']")
+if finished is None:
+    raise SystemExit("Ubiquity finished_dialog was not found")
+
+prop(finished, "title", "Trebo installation complete")
+prop(finished, "resizable", "False")
+prop(finished, "border_width", "12")
+
+icon = finished.find(".//object[@id='image1']")
+if icon is not None:
+    prop(icon, "icon_name", "trebo-symbolic")
+    prop(icon, "icon-size", "5")
+    prop(icon, "xpad", "8")
+    prop(icon, "ypad", "8")
+
+label = finished.find(".//object[@id='finished_label']")
+if label is None:
+    raise SystemExit("Ubiquity finished_label was not found")
+prop(label, "label", "Trebo Linux has been installed successfully. Restart the computer to start using the new installation.")
+prop(label, "wrap", "True")
+prop(label, "max-width-chars", "46")
+prop(label, "xpad", "8")
+prop(label, "ypad", "8")
+
+quit_button = finished.find(".//object[@id='quit_button']")
+if quit_button is not None:
+    prop(quit_button, "label", "Continue testing Trebo")
+
+reboot_button = finished.find(".//object[@id='reboot_button']")
+if reboot_button is not None:
+    prop(reboot_button, "label", "Restart now")
+
+shutdown_button = finished.find(".//object[@id='shutdown_button']")
+if shutdown_button is not None:
+    prop(shutdown_button, "label", "Shut down")
+
+tree.write(path, encoding="utf-8", xml_declaration=True)
+PY_TREBO_FINISHED_DIALOG
+
 # Replace the Ubiquity slideshow with the Trebo installation screen.
 SLIDES=/usr/share/ubiquity-slideshow/slides
 if [[ -d "$SLIDES" ]]; then
@@ -1137,6 +1251,8 @@ if [[ -e /usr/share/ubiquity/pixmaps/ubuntu-logo.png ]]; then
   install -m0644 /tmp/trebo-assets/trebo-installer-logo.png \
     /usr/share/ubiquity/pixmaps/ubuntu-logo.png
 fi
+# This image is used on Ubiquity's first language/choice page, not the final
+# completion dialog. Keep it intentionally small so it cannot dominate the UI.
 if [[ -e /usr/share/ubiquity/pixmaps/ubuntu_installed.png ]]; then
   install -m0644 /tmp/trebo-assets/trebo-installed.png \
     /usr/share/ubiquity/pixmaps/ubuntu_installed.png
@@ -1188,6 +1304,8 @@ background_sprite = Sprite(background_image);
 background_sprite.SetPosition(0, 0, -1000);
 
 text_sprite = Sprite();
+last_mode = "";
+forced_message = "";
 
 fun show_text(text) {
     text_image = Image.Text(text, 1.0, 1.0, 1.0, 1.0, "Sans 24");
@@ -1199,16 +1317,50 @@ fun show_text(text) {
     );
 }
 
-if (Plymouth.GetMode() == "shutdown")
-    show_text("Trebo is closing");
-else
-    show_text("Trebo is starting");
-
-fun message_callback(text) {
-    if (text == "Please remove media")
-        show_text("Please remove media");
+fun text_for_mode(mode) {
+    if (mode == "boot")
+        return "Trebo is starting";
+    if (mode == "resume")
+        return "Trebo is resuming";
+    if (mode == "shutdown")
+        return "Trebo is closing";
+    if (mode == "reboot")
+        return "Trebo is restarting";
+    if (mode == "suspend")
+        return "Trebo is suspending";
+    if (mode == "updates")
+        return "Trebo is installing updates";
+    if (mode == "system-upgrade")
+        return "Trebo is upgrading";
+    if (mode == "firmware-upgrade")
+        return "Trebo is updating firmware";
+    return "Trebo is working";
 }
 
+fun refresh_callback() {
+    mode = Plymouth.GetMode();
+
+    # Plymouth can change mode after the script has already loaded. The old
+    # theme only checked GetMode() once, which is why "Trebo is starting"
+    # leaked into shutdown/reboot/update screens.
+    if (mode != last_mode) {
+        last_mode = mode;
+        if (forced_message == "")
+            show_text(text_for_mode(mode));
+    }
+}
+
+fun message_callback(text) {
+    if (text == "Please remove media") {
+        forced_message = "Please remove media";
+        show_text(forced_message);
+    }
+}
+
+show_text(text_for_mode(Plymouth.GetMode()));
+last_mode = Plymouth.GetMode();
+
+Plymouth.SetRefreshFunction(refresh_callback);
 Plymouth.SetMessageFunction(message_callback);
 EOF_PLYMOUTH_SCRIPT
 
@@ -1275,6 +1427,15 @@ echo "Verified Linux 7 initramfs contains Casper and Trebo Plymouth."
 rm -f "$INITRD_LIST"
 
 echo "Final Trebo live kernel: $KVER"
+
+grep -Fq "installer-startup.ogg" "$UBIQUITY_GTK" || {
+  echo "Trebo installer startup audio patch is missing." >&2
+  exit 1
+}
+grep -Fq "Trebo installation complete" "$UBIQUITY_UI" || {
+  echo "Trebo Ubiquity completion dialog patch is missing." >&2
+  exit 1
+}
 
 # Do not ship crash reports generated while upgrading packages inside chroot;
 # they trigger bogus first-boot "System program problem detected" dialogs.
