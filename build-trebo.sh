@@ -1886,6 +1886,16 @@ rm -f "$TARGET/etc/initramfs-tools/conf.d/trebo-live"
 if [ -f "$TARGET/usr/share/plymouth/themes/trebo/trebo.plymouth" ]; then
   chroot "$TARGET" update-alternatives --set default.plymouth \
     /usr/share/plymouth/themes/trebo/trebo.plymouth >/dev/null 2>&1 || true
+
+  if [ -f "$TARGET/usr/share/plymouth/themes/trebo-text/trebo-text.plymouth" ]; then
+    chroot "$TARGET" update-alternatives --set text.plymouth \
+      /usr/share/plymouth/themes/trebo-text/trebo-text.plymouth >/dev/null 2>&1 || true
+  fi
+
+  if [ -f "$TARGET/usr/share/plymouth/themes/trebo-text/trebo-text.plymouth" ]; then
+    chroot "$TARGET" update-alternatives --set text.plymouth \
+      /usr/share/plymouth/themes/trebo-text/trebo-text.plymouth >/dev/null 2>&1 || true
+  fi
   mkdir -p "$TARGET/etc/plymouth"
   if [ -f "$TARGET/etc/plymouth/plymouthd.conf" ]; then
     if grep -q '^Theme=' "$TARGET/etc/plymouth/plymouthd.conf"; then
@@ -2088,6 +2098,27 @@ ImageDir=/usr/share/plymouth/themes/trebo
 ScriptFile=/usr/share/plymouth/themes/trebo/trebo.script
 EOF_PLYMOUTH
 
+# Plymouth always carries a separate text fallback theme in the initramfs.
+# On systems where the graphical script theme cannot start early enough,
+# Plymouth falls back to text.plymouth. Ubuntu's default alternative points to
+# ubuntu-text, which is exactly the purple "Ubuntu 24.04" screen. Replace that
+# fallback too so Trebo never falls back to Ubuntu artwork.
+TEXT_THEME=/usr/share/plymouth/themes/trebo-text
+mkdir -p "$TEXT_THEME"
+cat > "$TEXT_THEME/trebo-text.plymouth" <<'EOF_TREBO_TEXT_PLYMOUTH'
+[Plymouth Theme]
+Name=Trebo Text
+Description=Trebo fallback startup screen
+ModuleName=ubuntu-text
+
+[ubuntu-text]
+title=Trebo Linux 1.0
+black=0x202020
+white=0xffffff
+brown=0x3584e4
+blue=0x3584e4
+EOF_TREBO_TEXT_PLYMOUTH
+
 cat > "$THEME/trebo.script" <<'EOF_PLYMOUTH_SCRIPT'
 background_image = Image("background.png");
 background_image = background_image.Scale(Window.GetWidth(), Window.GetHeight());
@@ -2160,6 +2191,11 @@ update-alternatives \
   default.plymouth "$THEME/trebo.plymouth" 500
 update-alternatives --set default.plymouth "$THEME/trebo.plymouth"
 
+update-alternatives \
+  --install /usr/share/plymouth/themes/text.plymouth \
+  text.plymouth "$TEXT_THEME/trebo-text.plymouth" 500
+update-alternatives --set text.plymouth "$TEXT_THEME/trebo-text.plymouth"
+
 # Make the Trebo theme explicit in Plymouth's own configuration too. Ubuntu
 # normally relies on the default.plymouth alternative, but keeping both in
 # agreement prevents later package upgrades from silently falling back.
@@ -2180,6 +2216,11 @@ fi
 
 [[ "$(readlink -f /usr/share/plymouth/themes/default.plymouth)" == "$THEME/trebo.plymouth" ]] || {
   echo "Trebo Plymouth is not the selected default theme." >&2
+  exit 1
+}
+
+[[ "$(readlink -f /usr/share/plymouth/themes/text.plymouth)" == "$TEXT_THEME/trebo-text.plymouth" ]] || {
+  echo "Trebo text fallback is not the selected Plymouth fallback theme." >&2
   exit 1
 }
 
@@ -2306,6 +2347,12 @@ if [[ -f "/boot/initrd.img-$KVER" ]]; then
     exit 1
   fi
 
+  if ! grep -F 'usr/share/plymouth/themes/trebo-text/trebo-text.plymouth' "$INITRD_LIST" >/dev/null; then
+    echo "Linux 7 live initramfs does not contain the Trebo text fallback theme." >&2
+    rm -f "$INITRD_LIST"
+    exit 1
+  fi
+
   if ! grep -E '/plymouth/script\.so$' "$INITRD_LIST" >/dev/null; then
     echo "Linux 7 live initramfs does not contain Plymouth's script plugin." >&2
     rm -f "$INITRD_LIST"
@@ -2343,7 +2390,8 @@ lsinitramfs "/boot/initrd.img-$KVER" > "$NORMAL_INITRD_LIST"
 for required in \
   'usr/share/plymouth/themes/trebo/trebo.plymouth' \
   'usr/share/plymouth/themes/trebo/trebo.script' \
-  'usr/share/plymouth/themes/trebo/background.png'
+  'usr/share/plymouth/themes/trebo/background.png' \
+  'usr/share/plymouth/themes/trebo-text/trebo-text.plymouth'
 do
   grep -Fq "$required" "$NORMAL_INITRD_LIST" || {
     echo "Normal Linux 7 initramfs is missing Trebo Plymouth asset: $required" >&2
@@ -2460,6 +2508,15 @@ grep -q '^BOOT=local$' /etc/initramfs-tools/initramfs.conf || {
   echo "Reusable rootfs lost Trebo as the default Plymouth theme." >&2
   exit 1
 }
+
+[[ "$(readlink -f /usr/share/plymouth/themes/text.plymouth)" == "/usr/share/plymouth/themes/trebo-text/trebo-text.plymouth" ]] || {
+  echo "Reusable rootfs lost Trebo as the Plymouth text fallback theme." >&2
+  exit 1
+}
+if grep -Fq 'title=Ubuntu' /usr/share/plymouth/themes/trebo-text/trebo-text.plymouth; then
+  echo "Trebo text fallback still contains Ubuntu branding." >&2
+  exit 1
+fi
 grep -q '^Theme=trebo$' /etc/plymouth/plymouthd.conf || {
   echo "Plymouth daemon configuration does not explicitly select Trebo." >&2
   exit 1
