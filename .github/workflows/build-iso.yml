@@ -146,6 +146,14 @@ jobs:
           grep -Fq 'installer-startup.ogg' "$UBIQUITY_GTK"
           grep -Fq 'Install Trebo Linux' "$ROOT/usr/share/ubiquity/gtk/ubiquity.ui"
 
+          test -s "$ROOT/usr/share/pixmaps/trebo-login-logo.png"
+          grep -Fq "logo='/usr/share/pixmaps/trebo-login-logo.png'" \
+            "$ROOT/usr/share/glib-2.0/schemas/99_trebo.gschema.override"
+          grep -Fq "background-picture-uri='file:///usr/share/backgrounds/trebo-background.png'" \
+            "$ROOT/etc/dconf/db/gdm.d/00-trebo"
+          grep -Fq "custom-theme-running-dots-color='#3584e4'" \
+            "$ROOT/usr/share/glib-2.0/schemas/99_trebo.gschema.override"
+
           for app_pkg in \
             libreoffice-writer \
             libreoffice-calc \
