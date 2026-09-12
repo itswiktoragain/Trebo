@@ -77,43 +77,27 @@ jobs:
               end = text.find(f"\n{marker}", start)
               if end < 0:
                   raise SystemExit(f"Missing terminator for {marker}")
-              source = text[start:end]
-              compile(source, marker, "exec")
+              compile(text[start:end], marker, "exec")
               print(f"Compiled embedded Python: {marker}")
           PY_STATIC
 
           if grep -q '^DISTRIB_CODENAME=trebo$' ./build-trebo.sh; then
-            echo "Refusing to build: Ubiquity would treat Trebo as a nonexistent Ubuntu archive suite."
+            echo "Refusing to build: Ubiquity would use a nonexistent Trebo archive suite."
             exit 1
           fi
-          if ! grep -q '^DISTRIB_CODENAME=noble$' ./build-trebo.sh; then
-            echo "Refusing to build: Noble archive codename guard is missing."
-            exit 1
-          fi
+          grep -q '^DISTRIB_CODENAME=noble$' ./build-trebo.sh
+
           if grep -nE '^[[:space:]]*apt(-get)?[[:space:]].*(remove|purge|autoremove)' ./build-trebo.sh; then
-            echo "Refusing to build: package-removal command found in remaster script."
+            echo "Refusing to build: broad package-removal command found."
             exit 1
           fi
-          if ! grep -Fq 'BOOT=casper update-initramfs -c -k "$KVER"' ./build-trebo.sh; then
-            echo "Refusing to build: Linux 7 live initrd is not explicitly built in Casper mode."
-            exit 1
-          fi
-          if ! grep -Fq "grep -Fx 'scripts/casper'" ./build-trebo.sh; then
-            echo "Refusing to build: generated Linux 7 live initrd is not checked for scripts/casper."
-            exit 1
-          fi
-          if ! grep -Fq 'cp "$ROOTFS/boot/vmlinuz-$KVER" "$ISO_DIR/casper/vmlinuz"' ./build-trebo.sh; then
-            echo "Refusing to build: ISO is not wired to boot Linux 7."
-            exit 1
-          fi
-          if ! grep -Fq 'rm -f /etc/initramfs-tools/conf.d/trebo-live' ./build-trebo.sh; then
-            echo "Refusing to build: live-only initramfs configuration is not removed before packaging."
-            exit 1
-          fi
-          if ! grep -Fq '99trebo-installed' ./build-trebo.sh; then
-            echo "Refusing to build: Ubiquity installed-system cleanup hook is missing."
-            exit 1
-          fi
+
+          grep -Fq 'BOOT=casper update-initramfs -c -k "$KVER"' ./build-trebo.sh
+          grep -Fq "grep -Fx 'scripts/casper'" ./build-trebo.sh
+          grep -Fq 'cp "$ROOTFS/boot/vmlinuz-$KVER" "$ISO_DIR/casper/vmlinuz"' ./build-trebo.sh
+          grep -Fq '99trebo-installed' ./build-trebo.sh
+          grep -Fq 'GdkPixbuf.Pixbuf.new_from_file' ./build-trebo.sh
+          grep -Fq 'trebo-install-details' ./build-trebo.sh
 
       - name: Build Trebo
         shell: bash
@@ -136,12 +120,17 @@ jobs:
 
           ROOT=trebo-work/rootfs
           ISO=trebo-work/iso
+          UBIQUITY_GTK="$ROOT/usr/lib/ubiquity/ubiquity/frontend/gtk_ui.py"
 
           test -x "$ROOT/usr/lib/ubiquity/target-config/99trebo-installed"
           test -x "$ROOT/usr/lib/trebo/trebo-updater.py"
           test -x "$ROOT/usr/bin/update-manager"
+          test -f "$ROOT/usr/share/applications/trebo-updater.desktop"
+          grep -q '^NoDisplay=true$' "$ROOT/usr/share/applications/update-manager.desktop"
+
           test "$(sudo chroot "$ROOT" dpkg-divert --listpackage /usr/bin/update-manager)" = "LOCAL"
           test "$(sudo chroot "$ROOT" dpkg-divert --listpackage /usr/share/applications/update-manager.desktop)" = "LOCAL"
+
           test ! -e "$ROOT/etc/initramfs-tools/conf.d/trebo-live"
           grep -q '^BOOT=local$' "$ROOT/etc/initramfs-tools/initramfs.conf"
           test ! -s "$ROOT/etc/machine-id"
@@ -151,115 +140,11 @@ jobs:
           test "$(readlink "$ROOT/usr/share/themes/Trebo")" = "Orchis-Grey"
           test ! -e "$ISO/casper/filesystem.manifest-minimal-remove"
 
-          grep -q '^DISTRIB_CODENAME=noble
-          for ext in \
-            ubuntu-dock@ubuntu.com \
-            ubuntu-appindicators@ubuntu.com \
-            ding@rastersoft.com \
-            tiling-assistant@ubuntu.com
-          do
-            test -d "$ROOT/usr/share/gnome-shell/extensions/$ext"
-          done
-
-          grep -q '^casper ' "$ISO/casper/filesystem.manifest-remove"
-          grep -q '^ubiquity ' "$ISO/casper/filesystem.manifest-remove"
-
-          test -f "$ISO/casper/initrd"
-          lsinitramfs "$ISO/casper/initrd" > /tmp/trebo-initrd.list
-          grep -Fxq 'scripts/casper' /tmp/trebo-initrd.list
-          grep -Fq 'usr/share/plymouth/themes/trebo/trebo.plymouth' \
-            /tmp/trebo-initrd.list
-
-          found_casper_boot=0
-          while IFS= read -r boot_file; do
-            [[ -f "$boot_file" ]] || continue
-            if grep -q 'boot=casper' "$boot_file"; then
-              found_casper_boot=1
-              if grep 'boot=casper' "$boot_file" \
-                | grep -vqE '(^|[[:space:]])noprompt([[:space:]]|$)'; then
-                echo "Casper boot entry without noprompt: $boot_file"
-                exit 1
-              fi
-            fi
-          done < <(printf '%s\n' \
-            "$ISO/boot/grub/grub.cfg" \
-            "$ISO/boot/grub/loopback.cfg" \
-            "$ISO/isolinux/txt.cfg" \
-            "$ISO/isolinux/menu.cfg" \
-            "$ISO/isolinux/isolinux.cfg")
-          test "$found_casper_boot" -eq 1
-
-      - name: Upload Trebo ISO
-        uses: actions/upload-artifact@v4
-        with:
-          name: Trebo-20.04.6-amd64
-          path: |
-            Trebo-20.04.6-amd64.iso
-            Trebo-20.04.6-amd64.iso.sha256
-          compression-level: 0
-          retention-days: 3
-          if-no-files-found: error
- "$ROOT/etc/lsb-release"
-          grep -Fq "GdkPixbuf.Pixbuf.new_from_file" \
-            "$ROOT/usr/lib/ubiquity/ubiquity/frontend/gtk_ui.py"
-          grep -Fq "trebo-install-details" \
-            "$ROOT/usr/lib/ubiquity/ubiquity/frontend/gtk_ui.py"
-          grep -Fq "installer-startup.ogg" \
-            "$ROOT/usr/lib/ubiquity/ubiquity/frontend/gtk_ui.py"
-          grep -Fq "Install Trebo Linux" \
-            "$ROOT/usr/share/ubiquity/gtk/ubiquity.ui"
-
-          grep -q '^NoDisplay=true
-          for ext in \
-            ubuntu-dock@ubuntu.com \
-            ubuntu-appindicators@ubuntu.com \
-            ding@rastersoft.com \
-            tiling-assistant@ubuntu.com
-          do
-            test -d "$ROOT/usr/share/gnome-shell/extensions/$ext"
-          done
-
-          grep -q '^casper ' "$ISO/casper/filesystem.manifest-remove"
-          grep -q '^ubiquity ' "$ISO/casper/filesystem.manifest-remove"
-
-          test -f "$ISO/casper/initrd"
-          lsinitramfs "$ISO/casper/initrd" > /tmp/trebo-initrd.list
-          grep -Fxq 'scripts/casper' /tmp/trebo-initrd.list
-          grep -Fq 'usr/share/plymouth/themes/trebo/trebo.plymouth' \
-            /tmp/trebo-initrd.list
-
-          found_casper_boot=0
-          while IFS= read -r boot_file; do
-            [[ -f "$boot_file" ]] || continue
-            if grep -q 'boot=casper' "$boot_file"; then
-              found_casper_boot=1
-              if grep 'boot=casper' "$boot_file" \
-                | grep -vqE '(^|[[:space:]])noprompt([[:space:]]|$)'; then
-                echo "Casper boot entry without noprompt: $boot_file"
-                exit 1
-              fi
-            fi
-          done < <(printf '%s\n' \
-            "$ISO/boot/grub/grub.cfg" \
-            "$ISO/boot/grub/loopback.cfg" \
-            "$ISO/isolinux/txt.cfg" \
-            "$ISO/isolinux/menu.cfg" \
-            "$ISO/isolinux/isolinux.cfg")
-          test "$found_casper_boot" -eq 1
-
-      - name: Upload Trebo ISO
-        uses: actions/upload-artifact@v4
-        with:
-          name: Trebo-20.04.6-amd64
-          path: |
-            Trebo-20.04.6-amd64.iso
-            Trebo-20.04.6-amd64.iso.sha256
-          compression-level: 0
-          retention-days: 3
-          if-no-files-found: error
- \
-            "$ROOT/usr/share/applications/update-manager.desktop"
-          test -f "$ROOT/usr/share/applications/trebo-updater.desktop"
+          grep -q '^DISTRIB_CODENAME=noble$' "$ROOT/etc/lsb-release"
+          grep -Fq 'GdkPixbuf.Pixbuf.new_from_file' "$UBIQUITY_GTK"
+          grep -Fq 'trebo-install-details' "$UBIQUITY_GTK"
+          grep -Fq 'installer-startup.ogg' "$UBIQUITY_GTK"
+          grep -Fq 'Install Trebo Linux' "$ROOT/usr/share/ubiquity/gtk/ubiquity.ui"
 
           for app_pkg in \
             libreoffice-writer \
@@ -276,7 +161,8 @@ jobs:
             gnome-system-monitor \
             seahorse
           do
-            test "$(sudo chroot "$ROOT" dpkg-query -W -f='${db:Status-Status}' "$app_pkg")" = "installed"
+            state="$(sudo chroot "$ROOT" dpkg-query -W -f='${db:Status-Status}' "$app_pkg")"
+            test "$state" = "installed"
           done
 
           for ext in \
@@ -298,7 +184,13 @@ jobs:
             /tmp/trebo-initrd.list
 
           found_casper_boot=0
-          while IFS= read -r boot_file; do
+          for boot_file in \
+            "$ISO/boot/grub/grub.cfg" \
+            "$ISO/boot/grub/loopback.cfg" \
+            "$ISO/isolinux/txt.cfg" \
+            "$ISO/isolinux/menu.cfg" \
+            "$ISO/isolinux/isolinux.cfg"
+          do
             [[ -f "$boot_file" ]] || continue
             if grep -q 'boot=casper' "$boot_file"; then
               found_casper_boot=1
@@ -308,12 +200,7 @@ jobs:
                 exit 1
               fi
             fi
-          done < <(printf '%s\n' \
-            "$ISO/boot/grub/grub.cfg" \
-            "$ISO/boot/grub/loopback.cfg" \
-            "$ISO/isolinux/txt.cfg" \
-            "$ISO/isolinux/menu.cfg" \
-            "$ISO/isolinux/isolinux.cfg")
+          done
           test "$found_casper_boot" -eq 1
 
       - name: Upload Trebo ISO
