@@ -339,7 +339,7 @@ document-font-name='Cantarell 11'
 monospace-font-name='Monospace 11'
 
 [org/gnome/shell]
-enabled-extensions=['ubuntu-dock@ubuntu.com']
+enabled-extensions=['ubuntu-dock@ubuntu.com','ubuntu-appindicators@ubuntu.com','ding@rastersoft.com','tiling-assistant@ubuntu.com']
 
 [org/gnome/shell/extensions/dash-to-dock]
 dock-position='LEFT'
@@ -484,7 +484,7 @@ for arg in sys.argv[1:]:
         total += n1 + n2
 
 if total == 0:
-    raise SystemExit("No buggy dual-directory run-parts calls were found")
+    print("No dual-directory run-parts workaround was needed.")
 PY_FIX
 chmod +x /tmp/trebo-kernel7/fix-run-parts.py
 
@@ -504,7 +504,10 @@ for deb in "${kernel_debs[@]}"; do
   if (( ${#maint_scripts[@]} > 0 )); then
     # Some packages (for example modules) may not contain the broken pattern,
     # so patch per-package without requiring every package to match.
-    before="$(grep -hE '/etc/kernel/[^ ]+\.d[[:space:]]+/usr/share/kernel/[^ ]+\.d' "${maint_scripts[@]}" 2>/dev/null | wc -l)"
+    before="$(
+      { grep -hE '/etc/kernel/[^ ]+\.d[[:space:]]+/usr/share/kernel/[^ ]+\.d' "${maint_scripts[@]}" 2>/dev/null || true; } \
+        | wc -l
+    )"
     if (( before > 0 )); then
       /tmp/trebo-kernel7/fix-run-parts.py "${maint_scripts[@]}"
       patched_calls=$((patched_calls + before))
@@ -514,10 +517,11 @@ for deb in "${kernel_debs[@]}"; do
   dpkg-deb -b "$pkgdir" "/tmp/trebo-kernel7/fixed/$deb"
 done
 
-(( patched_calls > 0 )) || {
-  echo "Expected the Linux 7 mainline run-parts bug, but no affected maintainer script was found." >&2
-  exit 1
-}
+if (( patched_calls > 0 )); then
+  echo "Patched $patched_calls Linux 7 mainline maintainer-script run-parts call(s)."
+else
+  echo "Linux 7 mainline packages no longer need the run-parts compatibility workaround."
+fi
 
 # Install modules first, then the image. Do NOT run apt-get -f here: these
 # mainline packages are local files and are not present in the Focal archive,
@@ -814,7 +818,9 @@ ln -sfn /usr/lib/os-release /etc/os-release
 cat > /etc/lsb-release <<'EOF_LSB'
 DISTRIB_ID=Trebo
 DISTRIB_RELEASE=1.0
-DISTRIB_CODENAME=trebo
+# Keep the archive suite real. Ubiquity's choose-mirror reads this exact
+# field and would otherwise try to use a nonexistent "trebo" Ubuntu suite.
+DISTRIB_CODENAME=noble
 DISTRIB_DESCRIPTION="Trebo Linux 1.0"
 EOF_LSB
 
@@ -1205,10 +1211,9 @@ do
   remove_exact_optional_package "$game_pkg"
 done
 
-# A leftover Yaru icon directory must not win icon lookup.
-find /usr/share/icons -mindepth 1 -maxdepth 1 -type d -name 'Yaru*' \
-  -exec rm -rf {} + 2>/dev/null || true
-
+# Never delete files from a package that dpkg had to keep. Papirus-Trebo is
+# the configured icon theme, so a retained Yaru package is harmless and
+# remains internally consistent.
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then
   gtk-update-icon-cache -f "$TREBO_ICONS" || true
   [[ -d /usr/share/icons/Papirus ]] && gtk-update-icon-cache -f /usr/share/icons/Papirus || true
@@ -1254,7 +1259,7 @@ monospace-font-name='Monospace 11'
 
 [org/gnome/shell]
 disable-user-extensions=false
-enabled-extensions=['ubuntu-dock@ubuntu.com']
+enabled-extensions=['ubuntu-dock@ubuntu.com','ubuntu-appindicators@ubuntu.com','ding@rastersoft.com','tiling-assistant@ubuntu.com']
 
 [org/gnome/shell/extensions/dash-to-dock]
 dock-position='LEFT'
@@ -1279,7 +1284,7 @@ color-scheme='default'
 
 [org.gnome.shell]
 disable-user-extensions=false
-enabled-extensions=['ubuntu-dock@ubuntu.com']
+enabled-extensions=['ubuntu-dock@ubuntu.com','ubuntu-appindicators@ubuntu.com','ding@rastersoft.com','tiling-assistant@ubuntu.com']
 
 [org.gnome.desktop.interface:ubuntu]
 gtk-theme='Trebo'
@@ -1289,7 +1294,7 @@ color-scheme='default'
 
 [org.gnome.shell:ubuntu]
 disable-user-extensions=false
-enabled-extensions=['ubuntu-dock@ubuntu.com']
+enabled-extensions=['ubuntu-dock@ubuntu.com','ubuntu-appindicators@ubuntu.com','ding@rastersoft.com','tiling-assistant@ubuntu.com']
 
 [org.gnome.shell.extensions.dash-to-dock]
 dock-position='LEFT'
@@ -1557,6 +1562,42 @@ install -Dm0644 /tmp/trebo-assets/trebo-symbolic.svg \
 sed -i -E 's/^Icon=.*/Icon=trebo-installer-symbolic/' \
   /usr/share/applications/ubiquity.desktop
 
+
+# Ubiquity officially runs executable scripts from /usr/lib/ubiquity/target-config
+# after copying the live filesystem. Use that supported hook point to make sure
+# the installed OS is no longer configured like a Casper live session.
+mkdir -p /usr/lib/ubiquity/target-config
+cat > /usr/lib/ubiquity/target-config/99trebo-installed <<'EOF_TREBO_TARGET'
+#!/bin/sh
+set -eu
+
+TARGET=/target
+[ -d "$TARGET" ] || exit 0
+
+rm -f "$TARGET/etc/initramfs-tools/conf.d/trebo-live"
+rm -f "$TARGET/etc/systemd/system/trebo-casper-noprompt.service"
+rm -f "$TARGET/etc/systemd/system/multi-user.target.wants/trebo-casper-noprompt.service"
+rm -f "$TARGET/var/lib/systemd/random-seed"
+
+# Each installed machine must get its own identity rather than inheriting the
+# live image's ID. --root deliberately avoids reusing the live session ID.
+rm -f "$TARGET/etc/machine-id" "$TARGET/var/lib/dbus/machine-id"
+: > "$TARGET/etc/machine-id"
+systemd-machine-id-setup --root="$TARGET" >/dev/null
+mkdir -p "$TARGET/var/lib/dbus"
+ln -sfn /etc/machine-id "$TARGET/var/lib/dbus/machine-id"
+
+# The live image's /boot/initrd is Casper-enabled. Rebuild target initrds after
+# removing the live-only configuration so installed Trebo boots normally.
+if [ -x "$TARGET/usr/sbin/update-initramfs" ]; then
+  chroot "$TARGET" /usr/sbin/update-initramfs -u -k all
+fi
+
+rm -f "$TARGET/usr/lib/ubiquity/target-config/99trebo-installed"
+exit 0
+EOF_TREBO_TARGET
+chmod 0755 /usr/lib/ubiquity/target-config/99trebo-installed
+
 # Trebo Plymouth theme for the installed OS.
 THEME=/usr/share/plymouth/themes/trebo
 mkdir -p "$THEME"
@@ -1725,6 +1766,13 @@ fi
 echo "Verified Linux 7 initramfs contains Casper and Trebo Plymouth."
 rm -f "$INITRD_LIST"
 
+# /etc/initramfs-tools/conf.d/trebo-live exists only to BUILD the live ISO
+# initrd. Shipping it inside filesystem.squashfs would make an installed Trebo
+# regenerate future initrds with BOOT=casper and RESUME=none. That can cause
+# installed-system boot/shutdown hangs. The already-built live initrd keeps
+# its Casper configuration after this file is removed.
+rm -f /etc/initramfs-tools/conf.d/trebo-live
+
 echo "Final Trebo live kernel: $KVER"
 
 grep -Fq "installer-startup.ogg" "$UBIQUITY_GTK" || {
@@ -1784,6 +1832,21 @@ do
   }
 done
 
+# This rootfs is a reusable live/install image. Do not clone build-time machine
+# identity, random seed, crash state, or old package-manager logs into every
+# Trebo boot/install.
+rm -f /var/lib/systemd/random-seed /var/lib/systemd/credential.secret
+rm -f /var/crash/* 2>/dev/null || true
+: > /etc/machine-id
+mkdir -p /var/lib/dbus
+rm -f /var/lib/dbus/machine-id
+ln -s /etc/machine-id /var/lib/dbus/machine-id
+
+for log_file in /var/log/dpkg.log /var/log/alternatives.log; do
+  [[ -f "$log_file" ]] && : > "$log_file"
+done
+rm -f /var/log/apt/history.log /var/log/apt/term.log 2>/dev/null || true
+
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 rm -rf /tmp/trebo-assets /tmp/trebo-customize.sh
@@ -1811,8 +1874,15 @@ mount -t sysfs sys "$ROOTFS/sys"
 mount --bind /run "$ROOTFS/run"
 mounted=1
 
+# Recover cleanly from a previous interrupted build before replacing DNS for
+# the chroot. Preserve symlink metadata rather than dereferencing it.
+if [[ -e "$ROOTFS/etc/resolv.conf.trebo-backup" || -L "$ROOTFS/etc/resolv.conf.trebo-backup" ]]; then
+  rm -f "$ROOTFS/etc/resolv.conf"
+  mv "$ROOTFS/etc/resolv.conf.trebo-backup" "$ROOTFS/etc/resolv.conf"
+fi
+
 if [[ -e "$ROOTFS/etc/resolv.conf" || -L "$ROOTFS/etc/resolv.conf" ]]; then
-  cp -aL "$ROOTFS/etc/resolv.conf" "$ROOTFS/etc/resolv.conf.trebo-backup" || true
+  cp -a --no-dereference "$ROOTFS/etc/resolv.conf" "$ROOTFS/etc/resolv.conf.trebo-backup"
 fi
 rm -f "$ROOTFS/etc/resolv.conf"
 cp -L /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
@@ -1853,10 +1923,17 @@ else
 fi
 
 rm -f "$ROOTFS/etc/resolv.conf"
-if [[ -f "$ROOTFS/etc/resolv.conf.trebo-backup" ]]; then
+if [[ -e "$ROOTFS/etc/resolv.conf.trebo-backup" || -L "$ROOTFS/etc/resolv.conf.trebo-backup" ]]; then
   mv "$ROOTFS/etc/resolv.conf.trebo-backup" "$ROOTFS/etc/resolv.conf"
-else
-  ln -s /run/systemd/resolve/stub-resolv.conf "$ROOTFS/etc/resolv.conf" || true
+fi
+
+# Noble's desktop uses systemd-resolved. Repair old work trees where a failed
+# build or the previous -L backup logic turned this into a static host file.
+if [[ -e "$ROOTFS/usr/lib/systemd/system/systemd-resolved.service" ]]; then
+  rm -f "$ROOTFS/etc/resolv.conf"
+  ln -s ../run/systemd/resolve/stub-resolv.conf "$ROOTFS/etc/resolv.conf"
+elif [[ ! -e "$ROOTFS/etc/resolv.conf" && ! -L "$ROOTFS/etc/resolv.conf" ]]; then
+  cp -L /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
 fi
 
 cleanup_mounts
@@ -1904,10 +1981,38 @@ do
   }' "$boot_file"
 done
 
-echo "Updating filesystem manifest..."
-chroot "$ROOTFS" dpkg-query -W --showformat='${Package} ${Version}\n'   > "$ISO_DIR/casper/filesystem.manifest"
+echo "Updating filesystem manifests..."
+chroot "$ROOTFS" dpkg-query -W --showformat='${Package} ${Version}\n' \
+  | LC_ALL=C sort > "$ISO_DIR/casper/filesystem.manifest"
 
-printf '%s\n' "$(du -sx --block-size=1 "$ROOTFS" | cut -f1)"   > "$ISO_DIR/casper/filesystem.size"
+# Ubiquity treats filesystem.manifest-remove as the authoritative list of
+# live-only packages to remove from the installed target. Never reuse the
+# Ubuntu 20.04 ISO's stale list after converting the rootfs to Noble.
+awk '
+  $1 == "casper" ||
+  $1 == "user-setup" ||
+  $1 == "oem-config" ||
+  $1 ~ /^oem-config-/ ||
+  $1 == "ubiquity" ||
+  $1 ~ /^ubiquity-/ { print }
+' "$ISO_DIR/casper/filesystem.manifest" \
+  > "$ISO_DIR/casper/filesystem.manifest-remove"
+
+# Keep the older manifest-desktop compatibility path correct too.
+awk '
+  NR == FNR { remove[$1]=1; next }
+  !($1 in remove) { print }
+' "$ISO_DIR/casper/filesystem.manifest-remove" \
+  "$ISO_DIR/casper/filesystem.manifest" \
+  > "$ISO_DIR/casper/filesystem.manifest-desktop"
+
+grep -q '^casper ' "$ISO_DIR/casper/filesystem.manifest-remove" \
+  || die "Generated manifest-remove does not contain casper"
+grep -q '^ubiquity ' "$ISO_DIR/casper/filesystem.manifest-remove" \
+  || die "Generated manifest-remove does not contain ubiquity"
+
+printf '%s\n' "$(du -sx --block-size=1 "$ROOTFS" | cut -f1)" \
+  > "$ISO_DIR/casper/filesystem.size"
 
 echo "Rebuilding SquashFS..."
 rm -f   "$ISO_DIR/casper/filesystem.squashfs"   "$ISO_DIR/casper/filesystem.squashfs.gpg"
