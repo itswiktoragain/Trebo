@@ -454,8 +454,28 @@ fi
 apt-mark unhold casper 2>/dev/null || true
 apt-get update
 
+# Focal's old Wubi helper, lupin-casper, owns
+# /usr/share/initramfs-tools/scripts/casper-premount/20iso_scan.
+# Modern Casper owns that file itself, so leaving lupin-casper installed makes
+# dpkg abort the Casper upgrade with a file-ownership collision.
+#
+# Do NOT use apt remove/purge here: that could expand into dependency changes.
+# dpkg --no-act verifies that removing this exact obsolete Wubi helper is safe,
+# and dpkg --remove then removes ONLY that package.
+if dpkg-query -W -f='${db:Status-Status}\n' lupin-casper 2>/dev/null | grep -qx installed; then
+  echo "Removing obsolete Focal Wubi helper lupin-casper before modern Casper..."
+  if ! dpkg --no-act --remove lupin-casper; then
+    echo "Refusing to remove lupin-casper because dpkg reports a dependency problem." >&2
+    exit 1
+  fi
+  dpkg --remove lupin-casper
+fi
+
+# A previous interrupted Casper unpack can leave dpkg's status database in a
+# partial state. Reinstall the single target package directly from the current
+# Noble archive rather than asking apt to perform a broad dependency repair.
 casper_simulation="$(mktemp)"
-apt-get -s install casper > "$casper_simulation"
+apt-get -s install --reinstall casper > "$casper_simulation"
 for critical in ubiquity ubiquity-frontend-gtk systemd initramfs-tools gdm3 gnome-shell; do
   if awk '$1 == "Remv" {print $2}' "$casper_simulation" | grep -qx "$critical"; then
     echo "Refusing Casper refresh because apt wants to remove critical package: $critical" >&2
@@ -466,7 +486,7 @@ for critical in ubiquity ubiquity-frontend-gtk systemd initramfs-tools gdm3 gnom
 done
 rm -f "$casper_simulation"
 
-apt-get install -y --no-install-recommends casper
+apt-get install -y --reinstall --no-install-recommends casper
 
 # initramfs-tools dispatches the root-mount script through /scripts/$BOOT.
 # Without BOOT=casper, a freshly generated initrd can be perfectly valid for
