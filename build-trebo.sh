@@ -242,6 +242,9 @@ install_customization_packages() {
     baobab
     file-roller
     gnome-session-canberra
+    python3-gi
+    gir1.2-gtk-3.0
+    policykit-1
   )
   local missing=()
   local pkg
@@ -903,6 +906,214 @@ install -Dm0644 /tmp/trebo-assets/trebo-symbolic.svg \
 
 
 # ---------------------------------------------------------------------------
+# TREBO UPDATER
+# ---------------------------------------------------------------------------
+# ubuntu-desktop-minimal depends on Ubuntu's update-manager package, so removing
+# the package itself would break the desktop metapackage. Keep the dependency
+# satisfied but completely replace its user-facing launcher/notifier with a
+# Trebo-native GTK updater.
+mkdir -p /usr/lib/trebo
+
+cat > /usr/lib/trebo/trebo-updater-helper <<'EOF_TREBO_UPDATE_HELPER'
+#!/bin/sh
+set -eu
+
+action="${1:-}"
+
+case "$action" in
+  check)
+    apt-get update -qq
+    apt list --upgradable 2>/dev/null || true
+    ;;
+  install)
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get -y --no-remove upgrade
+    apt-get check
+    printf '\nTREBO_REMAINING_UPDATES\n'
+    apt list --upgradable 2>/dev/null || true
+    ;;
+  *)
+    echo "Usage: trebo-updater-helper {check|install}" >&2
+    exit 2
+    ;;
+esac
+EOF_TREBO_UPDATE_HELPER
+chmod 0755 /usr/lib/trebo/trebo-updater-helper
+
+cat > /usr/lib/trebo/trebo-updater.py <<'PY_TREBO_UPDATER'
+#!/usr/bin/env python3
+import subprocess
+import threading
+
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import GLib, Gtk
+
+HELPER = "/usr/lib/trebo/trebo-updater-helper"
+
+
+class TreboUpdater(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="Trebo Updater")
+        self.set_default_size(720, 500)
+        self.set_border_width(18)
+        self.set_icon_name("trebo-symbolic")
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        self.add(outer)
+
+        title = Gtk.Label()
+        title.set_markup("<span size='xx-large' weight='bold'>Trebo Updater</span>")
+        title.set_xalign(0)
+        outer.pack_start(title, False, False, 0)
+
+        subtitle = Gtk.Label(label="Keep Trebo Linux and installed applications up to date.")
+        subtitle.set_xalign(0)
+        outer.pack_start(subtitle, False, False, 0)
+
+        self.status = Gtk.Label(label="Ready to check for updates.")
+        self.status.set_xalign(0)
+        outer.pack_start(self.status, False, False, 0)
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_hexpand(True)
+        scroller.set_vexpand(True)
+        outer.pack_start(scroller, True, True, 0)
+
+        self.output = Gtk.TextView()
+        self.output.set_editable(False)
+        self.output.set_cursor_visible(False)
+        self.output.set_monospace(True)
+        self.output.set_wrap_mode(Gtk.WrapMode.NONE)
+        scroller.add(self.output)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        outer.pack_start(actions, False, False, 0)
+
+        self.check_button = Gtk.Button(label="Check for updates")
+        self.check_button.connect("clicked", lambda *_: self.run_action("check"))
+        actions.pack_start(self.check_button, False, False, 0)
+
+        self.install_button = Gtk.Button(label="Install updates")
+        self.install_button.get_style_context().add_class("suggested-action")
+        self.install_button.connect("clicked", lambda *_: self.run_action("install"))
+        actions.pack_start(self.install_button, False, False, 0)
+
+        close_button = Gtk.Button(label="Close")
+        close_button.connect("clicked", lambda *_: self.close())
+        actions.pack_end(close_button, False, False, 0)
+
+    def set_busy(self, busy):
+        self.check_button.set_sensitive(not busy)
+        self.install_button.set_sensitive(not busy)
+
+    def set_text(self, text):
+        buf = self.output.get_buffer()
+        buf.set_text(text.strip() + ("\n" if text.strip() else ""))
+
+    def run_action(self, action):
+        self.set_busy(True)
+        self.status.set_text(
+            "Checking package repositories..."
+            if action == "check"
+            else "Installing updates safely..."
+        )
+        self.set_text("Administrator authorization may be requested.")
+        threading.Thread(target=self.worker, args=(action,), daemon=True).start()
+
+    def worker(self, action):
+        try:
+            proc = subprocess.run(
+                ["pkexec", HELPER, action],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+            output = proc.stdout or ""
+            if proc.returncode == 0:
+                if action == "check":
+                    lines = [
+                        line for line in output.splitlines()
+                        if line and not line.startswith("Listing...")
+                    ]
+                    if lines:
+                        message = f"{len(lines)} update(s) available."
+                        body = "\n".join(lines)
+                    else:
+                        message = "Trebo is up to date."
+                        body = "No package updates are available."
+                else:
+                    message = "Update operation finished."
+                    body = output
+            elif proc.returncode == 126:
+                message = "Update cancelled."
+                body = output or "Administrator authorization was cancelled."
+            else:
+                message = "Updater encountered an error."
+                body = output or f"Update helper exited with status {proc.returncode}."
+        except Exception as exc:
+            message = "Updater encountered an error."
+            body = str(exc)
+
+        GLib.idle_add(self.finish_action, message, body)
+
+    def finish_action(self, message, body):
+        self.status.set_text(message)
+        self.set_text(body)
+        self.set_busy(False)
+        return False
+
+
+win = TreboUpdater()
+win.connect("destroy", Gtk.main_quit)
+win.show_all()
+Gtk.main()
+PY_TREBO_UPDATER
+chmod 0755 /usr/lib/trebo/trebo-updater.py
+
+cat > /usr/share/applications/trebo-updater.desktop <<'EOF_TREBO_UPDATER_DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Trebo Updater
+GenericName=Software Updates
+Comment=Check for and install Trebo Linux updates
+Exec=/usr/lib/trebo/trebo-updater.py
+Icon=trebo-symbolic
+Terminal=false
+Categories=System;Settings;
+Keywords=update;upgrade;software;packages;
+StartupNotify=true
+EOF_TREBO_UPDATER_DESKTOP
+
+# Replace Ubuntu's visible Software Updater launcher with Trebo Updater while
+# retaining the package underneath because ubuntu-desktop-minimal depends on it.
+if [[ -f /usr/share/applications/update-manager.desktop ]]; then
+  cp /usr/share/applications/trebo-updater.desktop /usr/share/applications/update-manager.desktop
+fi
+
+# Disable Ubuntu's automatic Update Notifier so it cannot reopen Update Manager.
+if [[ -f /etc/xdg/autostart/update-notifier.desktop ]]; then
+  if grep -q '^Hidden=' /etc/xdg/autostart/update-notifier.desktop; then
+    sed -i 's/^Hidden=.*/Hidden=true/' /etc/xdg/autostart/update-notifier.desktop
+  else
+    printf '\nHidden=true\n' >> /etc/xdg/autostart/update-notifier.desktop
+  fi
+fi
+
+mkdir -p /etc/systemd/user
+for notifier_unit in \
+  update-notifier-crash.path \
+  update-notifier-crash.service \
+  update-notifier-livepatch.path \
+  update-notifier-livepatch.service \
+  update-notifier-release.path \
+  update-notifier-release.service
+do
+  ln -sfn /dev/null "/etc/systemd/user/$notifier_unit"
+done
+
+# ---------------------------------------------------------------------------
 # PAPIRUS-TREBO + BIBATA MODERN ICE
 # ---------------------------------------------------------------------------
 # Use a tiny overlay theme that inherits Papirus. This keeps all Papirus
@@ -1222,22 +1433,25 @@ if shutdown_button is not None:
 tree.write(path, encoding="utf-8", xml_declaration=True)
 PY_TREBO_FINISHED_DIALOG
 
-# Replace the Ubiquity slideshow with the Trebo installation screen.
+# Replace the installation-progress slideshow with one deterministic Trebo
+# screen. Do not delete the package's link-core/runtime files; older builds did
+# that and could leave WebKit showing a blank white page.
 SLIDES=/usr/share/ubiquity-slideshow/slides
-if [[ -d "$SLIDES" ]]; then
-  rm -rf "$SLIDES"/*
-  cp /tmp/trebo-assets/background.png "$SLIDES/trebo-background.png"
+mkdir -p "$SLIDES"
+cp /tmp/trebo-assets/background.png "$SLIDES/trebo-background.png"
 
-  cat > "$SLIDES/index.html" <<'EOF_SLIDE'
+cat > "$SLIDES/trebo.html" <<'EOF_SLIDE'
 <!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="color-scheme" content="dark">
 <style>
 html,body {
   width:100%;
   height:100%;
   margin:0;
+  padding:0;
   overflow:hidden;
   background:#202020;
   font-family:Cantarell,DejaVu Sans,sans-serif;
@@ -1245,28 +1459,67 @@ html,body {
 body {
   background-image:url('trebo-background.png');
   background-size:100% 100%;
-  background-position:center;
+  background-position:center center;
   background-repeat:no-repeat;
   display:flex;
   align-items:center;
   justify-content:center;
-  color:white;
+  color:#fff;
 }
-#text {
-  font-size:34px;
+#panel {
+  padding:18px 28px;
+  border-radius:14px;
+  background:rgba(20,20,20,.50);
+  text-align:center;
+}
+#title {
+  font-size:30px;
   font-weight:600;
-  text-shadow:0 1px 4px rgba(0,0,0,.7);
+}
+#subtitle {
+  margin-top:8px;
+  font-size:16px;
+  opacity:.88;
 }
 </style>
 </head>
-<body><div id="text">Trebo is installing</div></body>
+<body>
+  <div id="panel">
+    <div id="title">Trebo is installing</div>
+    <div id="subtitle">You can continue using the computer while files are copied.</div>
+  </div>
+</body>
 </html>
 EOF_SLIDE
 
-  cat > "$SLIDES/directory.jsonp" <<'EOF_DIRECTORY'
-JSONP({"slides":["index.html"]});
-EOF_DIRECTORY
-fi
+# Ubiquity normally drives the slideshow through file:// + JS + directory.jsonp.
+# Load Trebo's static HTML directly with WebKit.load_html() instead. This avoids
+# the blank-white slideshow failure while preserving Ubiquity's progress bar.
+python3 - "$UBIQUITY_GTK" <<'PY_TREBO_SLIDESHOW'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+
+if "trebo.html" in text and "webview.load_html" in text:
+    print("Trebo installer progress screen is already patched.")
+    raise SystemExit(0)
+
+needle = "        webview.load_uri(slides)"
+replacement = """        with open('/usr/share/ubiquity-slideshow/slides/trebo.html', 'r', encoding='utf-8') as trebo_slide:
+            trebo_html = trebo_slide.read()
+        webview.load_html(
+            trebo_html,
+            'file:///usr/share/ubiquity-slideshow/slides/',
+        )"""
+
+if needle not in text:
+    raise SystemExit("Could not find Ubiquity's slideshow load_uri call")
+
+path.write_text(text.replace(needle, replacement, 1))
+print("Patched Ubiquity to load the Trebo installer progress screen directly.")
+PY_TREBO_SLIDESHOW
 
 # Replace only Ubiquity's small logo with a correctly sized dark Trebo mark.
 # The old build copied a 507x444 white image into both artwork slots.
@@ -1395,6 +1648,29 @@ if [[ -f /sbin/casper-stop ]]; then
   sed -i -E     's|^MSG=.*$|MSG="Please remove media"|; s|^MSG_FALLBACK=.*$|MSG_FALLBACK="Please remove media"|'     /sbin/casper-stop
 fi
 
+# Prevent the live session from hanging forever waiting for Enter during
+# shutdown/reboot. Casper explicitly honours /run/casper-no-prompt. This unit
+# only creates the marker when the machine is actually booted from live media;
+# on an installed Trebo system /cdrom/casper does not exist.
+cat > /etc/systemd/system/trebo-casper-noprompt.service <<'EOF_TREBO_NOPROMPT'
+[Unit]
+Description=Trebo live-session non-blocking shutdown
+DefaultDependencies=no
+After=local-fs.target
+Before=casper.service shutdown.target reboot.target poweroff.target
+ConditionPathExists=/cdrom/casper
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/touch /run/casper-no-prompt
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF_TREBO_NOPROMPT
+
+systemctl enable trebo-casper-noprompt.service >/dev/null 2>&1 || true
+
 # IMPORTANT: build the live Linux 7 initramfs only AFTER Trebo's Plymouth
 # theme has been installed and made the default. The initramfs is the first
 # userspace visible during boot. If it contains Ubuntu's default Plymouth
@@ -1457,6 +1733,16 @@ grep -Fq "installer-startup.ogg" "$UBIQUITY_GTK" || {
 }
 grep -Fq "Trebo installation complete" "$UBIQUITY_UI" || {
   echo "Trebo Ubiquity completion dialog patch is missing." >&2
+  exit 1
+}
+
+python3 -m py_compile /usr/lib/trebo/trebo-updater.py
+grep -Fq "trebo.html" "$UBIQUITY_GTK" || {
+  echo "Trebo direct installer progress-screen patch is missing." >&2
+  exit 1
+}
+[[ -f /usr/share/applications/trebo-updater.desktop ]] || {
+  echo "Trebo Updater desktop launcher is missing." >&2
   exit 1
 }
 
@@ -1600,10 +1886,22 @@ fi
 
 # Change only visible boot-menu text. Do not rewrite lowercase package paths,
 # preseed paths, boot parameters, or repository identifiers.
-for boot_file in   "$ISO_DIR/boot/grub/grub.cfg"   "$ISO_DIR/isolinux/txt.cfg"   "$ISO_DIR/isolinux/menu.cfg"   "$ISO_DIR/isolinux/isolinux.cfg"
+for boot_file in \
+  "$ISO_DIR/boot/grub/grub.cfg" \
+  "$ISO_DIR/boot/grub/loopback.cfg" \
+  "$ISO_DIR/isolinux/txt.cfg" \
+  "$ISO_DIR/isolinux/menu.cfg" \
+  "$ISO_DIR/isolinux/isolinux.cfg"
 do
   [[ -f "$boot_file" ]] || continue
   sed -i 's/Ubuntu/Trebo/g' "$boot_file"
+
+  # Casper's documented noprompt boot option prevents live shutdown/reboot
+  # from waiting indefinitely for a keypress after the installation media
+  # prompt. Add it only to boot=casper kernel command lines and only once.
+  sed -i -E '/boot=casper/ {
+    /(^|[[:space:]])noprompt([[:space:]]|$)/! s/(boot=casper)([[:space:]])/\1 noprompt\2/
+  }' "$boot_file"
 done
 
 echo "Updating filesystem manifest..."
