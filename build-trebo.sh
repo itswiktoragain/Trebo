@@ -2056,8 +2056,12 @@ grep -Fq "Trebo installation complete" "$UBIQUITY_UI" || {
 }
 
 python3 -m py_compile /usr/lib/trebo/trebo-updater.py
-grep -Fq "trebo.html" "$UBIQUITY_GTK" || {
-  echo "Trebo direct installer progress-screen patch is missing." >&2
+grep -Fq "GdkPixbuf.Pixbuf.new_from_file" "$UBIQUITY_GTK" || {
+  echo "Trebo pure-GTK installer background renderer is missing." >&2
+  exit 1
+}
+grep -Fq "trebo-install-details" "$UBIQUITY_GTK" || {
+  echo "Trebo installer details-expander styling is missing." >&2
   exit 1
 }
 [[ -f /usr/share/applications/trebo-updater.desktop ]] || {
