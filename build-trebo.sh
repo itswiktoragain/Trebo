@@ -63,6 +63,41 @@ apt-get install -y --no-install-recommends \
   ca-certificates curl initramfs-tools initramfs-tools-core \
   kmod linux-base software-properties-common
 
+
+# Fail fast on Trebo's dconf syntax BEFORE the kernel download and release
+# upgrades. An empty GSettings string-array needs an explicit GVariant type:
+#   @as []
+# Without it, dconf cannot infer the type and would otherwise fail near the
+# very end of a long build.
+if command -v dconf >/dev/null 2>&1; then
+  rm -rf /tmp/trebo-dconf-preflight.d /tmp/trebo-dconf-preflight
+  mkdir -p /tmp/trebo-dconf-preflight.d
+  cat > /tmp/trebo-dconf-preflight.d/00-trebo <<'EOF_DCONF_PREFLIGHT'
+[org/gnome/desktop/background]
+picture-uri='file:///usr/share/backgrounds/trebo-background.png'
+picture-options='stretched'
+primary-color='#202020'
+
+[org/gnome/desktop/screensaver]
+picture-uri='file:///usr/share/backgrounds/trebo-background.png'
+picture-options='stretched'
+
+[org/gnome/desktop/interface]
+gtk-theme='Adwaita'
+icon-theme='Adwaita'
+font-name='Cantarell 11'
+document-font-name='Cantarell 11'
+monospace-font-name='Monospace 11'
+
+[org/gnome/shell]
+enabled-extensions=@as []
+EOF_DCONF_PREFLIGHT
+
+  dconf compile /tmp/trebo-dconf-preflight /tmp/trebo-dconf-preflight.d
+  rm -rf /tmp/trebo-dconf-preflight.d /tmp/trebo-dconf-preflight
+  echo "Trebo dconf syntax preflight passed."
+fi
+
 # ---------------------------------------------------------------------------
 # PHASE 1: KERNEL FIRST
 # ---------------------------------------------------------------------------
@@ -450,7 +485,7 @@ document-font-name='Cantarell 11'
 monospace-font-name='Monospace 11'
 
 [org/gnome/shell]
-enabled-extensions=[]
+enabled-extensions=@as []
 EOF_DCONF
 
 dconf update
