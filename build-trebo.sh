@@ -30,6 +30,51 @@ done
 
 [[ $EUID -eq 0 ]] || die "Run this script as root: sudo bash ./build-trebo.sh"
 
+RESUME="${RESUME:-0}"
+QUICK="${QUICK:-0}"
+REFRESH_INITRD="${REFRESH_INITRD:-0}"
+
+usage() {
+  cat <<'EOF_USAGE'
+Usage:
+  sudo bash ./build-trebo.sh
+      Full build: extract Ubuntu, install Linux 7, Focal -> Jammy -> Noble,
+      customize Trebo, rebuild SquashFS, and create the ISO.
+
+  sudo bash ./build-trebo.sh --quick
+      Reuse trebo-work/rootfs. Skip Linux 7 installation, skip Focal/Jammy/
+      Noble release upgrades, skip Ubiquity/Casper reinstalls when healthy,
+      and preserve the existing Linux 7 initramfs. Apply desktop/theme/app
+      changes and rebuild only the SquashFS/ISO.
+
+  sudo bash ./build-trebo.sh --quick --refresh-initrd
+      Same as --quick, but also regenerate the existing Linux 7 initramfs.
+EOF_USAGE
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --quick)
+      QUICK=1
+      RESUME=1
+      ;;
+    --refresh-initrd)
+      REFRESH_INITRD=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "Unknown option: $arg"
+      ;;
+  esac
+done
+
+if [[ "$REFRESH_INITRD" == "1" && "$QUICK" != "1" ]]; then
+  die "--refresh-initrd is only meaningful together with --quick"
+fi
+
 mkdir -p "$WORKDIR"
 
 if [[ ! -f "$BASE_ISO" ]]; then
@@ -39,13 +84,37 @@ fi
 
 echo "$BASE_ISO_SHA256  $BASE_ISO" | sha256sum -c -
 
-RESUME="${RESUME:-0}"
-
 if [[ "$RESUME" == "1" ]]; then
   echo "Resuming existing Trebo work tree..."
   [[ -d "$ISO_DIR" ]] || die "RESUME=1 requested but $ISO_DIR does not exist"
   [[ -d "$ROOTFS" ]] || die "RESUME=1 requested but $ROOTFS does not exist"
-  [[ -f "$ROOTFS/tmp/trebo-kernel-version" ]] || die "RESUME=1 requested but the Linux 7 stage marker is missing"
+
+  mkdir -p "$ROOTFS/tmp"
+
+  # A successful older build removed /tmp/trebo-kernel-version from the rootfs.
+  # Restore it from the persistent workdir marker, or infer it from /boot.
+  if [[ ! -f "$ROOTFS/tmp/trebo-kernel-version" ]]; then
+    if [[ -f "$WORKDIR/kernel-version" ]]; then
+      cp "$WORKDIR/kernel-version" "$ROOTFS/tmp/trebo-kernel-version"
+    else
+      KVER_RECOVERED="$(
+        find "$ROOTFS/boot" -maxdepth 1 -type f -name 'vmlinuz-7.*' -printf '%f\n' \
+          | sed 's/^vmlinuz-//' \
+          | sort -V \
+          | tail -n1
+      )"
+      [[ -n "$KVER_RECOVERED" ]] || die "Could not recover the existing Linux 7 version from trebo-work"
+      [[ -f "$ROOTFS/boot/initrd.img-$KVER_RECOVERED" ]] || die "Existing Linux 7 initrd is missing for $KVER_RECOVERED"
+      printf '%s\n' "$KVER_RECOVERED" > "$ROOTFS/tmp/trebo-kernel-version"
+      printf '%s\n' "$KVER_RECOVERED" > "$WORKDIR/kernel-version"
+    fi
+  fi
+
+  if [[ "$QUICK" == "1" ]]; then
+    grep -Eq '^[[:space:]]*deb[[:space:]].*[[:space:]]noble([[:space:]]|$)' "$ROOTFS/etc/apt/sources.list" \
+      || die "--quick requires an already-upgraded Noble trebo-work/rootfs"
+    echo "QUICK MODE: reusing the existing Noble rootfs and Linux 7 kernel."
+  fi
 else
   echo "Preparing working tree..."
   rm -rf "$ISO_DIR" "$ROOTFS"
@@ -154,36 +223,83 @@ upgrade_to_suite() {
   apt-get -f install -y
 }
 
+install_customization_packages() {
+  local wanted=(
+    gnome-tweaks
+    plymouth
+    plymouth-label
+    plymouth-theme-spinner
+    gnome-shell-extension-ubuntu-dock
+    papirus-icon-theme
+    bibata-cursor-theme
+    orchis-gtk-theme
+    qt5-gtk-platformtheme
+    qt6-gtk-platformtheme
+    gnome-software
+    gparted
+    vlc
+    baobab
+    file-roller
+  )
+  local missing=()
+  local pkg
+
+  for pkg in "${wanted[@]}"; do
+    if [[ "$(dpkg-query -W -f='${db:Status-Status}' "$pkg" 2>/dev/null || true)" != "installed" ]]; then
+      missing+=("$pkg")
+    fi
+  done
+
+  if (( ${#missing[@]} > 0 )); then
+    echo "Installing only missing Trebo customization packages:"
+    printf '  %s\n' "${missing[@]}"
+    apt-get update
+    apt-get install -y --no-install-recommends "${missing[@]}"
+  else
+    echo "All Trebo customization packages are already installed; skipping APT install."
+  fi
+}
+
 install_final_desktop() {
   echo 'gdm3 shared/default-x-display-manager select gdm3' | debconf-set-selections
 
-  # Re-establish Canonical's supported Noble desktop core. --no-install-recommends
-  # avoids pulling the optional Ubuntu wallpaper/Yaru recommendation bundle,
-  # while still installing the session, PipeWire, portals, dock and desktop
-  # services that GNOME expects to have together.
-  apt-get install -y --no-install-recommends \
-    ubuntu-desktop-minimal \
-    gnome-tweaks \
-    plymouth \
-    plymouth-label \
-    plymouth-theme-spinner \
-    papirus-icon-theme \
-    bibata-cursor-theme \
-    orchis-gtk-theme \
-    qt5-gtk-platformtheme \
-    qt6-gtk-platformtheme \
-    gnome-software \
-    gparted \
-    vlc \
-    baobab \
-    file-roller
+  # Full builds repair the supported Noble desktop core once. Quick builds skip
+  # this metapackage operation and only install any missing customization apps.
+  apt-get install -y --no-install-recommends ubuntu-desktop-minimal
+  install_customization_packages
 
   dpkg --configure -a
   apt-get -f install -y
   apt-get check
 }
 
-if [[ "${TREBO_RESUME_AFTER_UPGRADE:-0}" != "1" ]]; then
+if [[ "${TREBO_QUICK:-0}" == "1" ]]; then
+  echo "QUICK MODE: skipping Linux 7 installation and all release upgrades."
+  KVER="$(cat /tmp/trebo-kernel-version)"
+  [[ "$KVER" == 7.* ]] || {
+    echo "Quick mode expected an existing Linux 7 kernel, got: $KVER" >&2
+    exit 1
+  }
+  [[ -f "/boot/vmlinuz-$KVER" ]] || {
+    echo "Quick mode cannot find /boot/vmlinuz-$KVER" >&2
+    exit 1
+  }
+  [[ -f "/boot/initrd.img-$KVER" ]] || {
+    echo "Quick mode cannot find /boot/initrd.img-$KVER" >&2
+    exit 1
+  }
+
+  current_suite="$(
+    awk '$1 == "deb" && $2 ~ /archive\.ubuntu\.com\/ubuntu/ && $3 !~ /-/ {print $3; exit}' \
+      /etc/apt/sources.list
+  )"
+  [[ "$current_suite" == "noble" ]] || {
+    echo "Quick mode requires an already-completed Noble userspace; found: $current_suite" >&2
+    exit 1
+  }
+
+  install_customization_packages
+elif [[ "${TREBO_RESUME_AFTER_UPGRADE:-0}" != "1" ]]; then
 echo "Preparing Focal only far enough to install Linux 7..."
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -563,30 +679,40 @@ fi
 # ---------------------------------------------------------------------------
 # NATIVE NOBLE UBIQUITY
 # ---------------------------------------------------------------------------
-# Resume builds may still contain the previously-held Focal Ubiquity packages.
-# Noble provides Ubiquity 24.04.x, so repair the entire installer stack from
-# the final repositories before applying Trebo branding.
-apt-mark unhold ubiquity ubiquity-frontend-gtk ubiquity-casper casper 2>/dev/null || true
-apt-get update
+# Resume builds may still contain an old/broken Ubiquity stack. Quick mode first
+# tests the existing Noble installer and skips the reinstall when it is healthy.
+UBIQUITY_VERSION="$(dpkg-query -W -f='${Version}' ubiquity 2>/dev/null || true)"
+UBIQUITY_HEALTHY=0
+if [[ "$UBIQUITY_VERSION" == 24.04.* ]] && \
+   PYTHONPATH=/usr/lib/ubiquity python3 -c 'import ubiquity, ubiquity.frontend.gtk_ui' >/dev/null 2>&1; then
+  UBIQUITY_HEALTHY=1
+fi
 
-UBIQUITY_SIMULATION="$(mktemp)"
-apt-get -s install --reinstall \
-  ubiquity ubiquity-frontend-gtk ubiquity-casper ubiquity-ubuntu-artwork \
-  ubiquity-slideshow-ubuntu > "$UBIQUITY_SIMULATION"
+if [[ "${TREBO_QUICK:-0}" == "1" && "$UBIQUITY_HEALTHY" == "1" ]]; then
+  echo "QUICK MODE: existing Noble Ubiquity is healthy; skipping its reinstall."
+else
+  apt-mark unhold ubiquity ubiquity-frontend-gtk ubiquity-casper casper 2>/dev/null || true
+  apt-get update
 
-for critical in systemd initramfs-tools gdm3 gnome-shell casper; do
-  if awk '$1 == "Remv" {print $2}' "$UBIQUITY_SIMULATION" | grep -Fx "$critical" >/dev/null; then
-    echo "Refusing Ubiquity repair because apt wants to remove critical package: $critical" >&2
-    cat "$UBIQUITY_SIMULATION" >&2
-    rm -f "$UBIQUITY_SIMULATION"
-    exit 1
-  fi
-done
-rm -f "$UBIQUITY_SIMULATION"
+  UBIQUITY_SIMULATION="$(mktemp)"
+  apt-get -s install --reinstall \
+    ubiquity ubiquity-frontend-gtk ubiquity-casper ubiquity-ubuntu-artwork \
+    ubiquity-slideshow-ubuntu > "$UBIQUITY_SIMULATION"
 
-apt-get install -y --reinstall --no-install-recommends \
-  ubiquity ubiquity-frontend-gtk ubiquity-casper ubiquity-ubuntu-artwork \
-  ubiquity-slideshow-ubuntu
+  for critical in systemd initramfs-tools gdm3 gnome-shell casper; do
+    if awk '$1 == "Remv" {print $2}' "$UBIQUITY_SIMULATION" | grep -Fx "$critical" >/dev/null; then
+      echo "Refusing Ubiquity repair because apt wants to remove critical package: $critical" >&2
+      cat "$UBIQUITY_SIMULATION" >&2
+      rm -f "$UBIQUITY_SIMULATION"
+      exit 1
+    fi
+  done
+  rm -f "$UBIQUITY_SIMULATION"
+
+  apt-get install -y --reinstall --no-install-recommends \
+    ubiquity ubiquity-frontend-gtk ubiquity-casper ubiquity-ubuntu-artwork \
+    ubiquity-slideshow-ubuntu
+fi
 
 UBIQUITY_VERSION="$(dpkg-query -W -f='${Version}' ubiquity 2>/dev/null || true)"
 case "$UBIQUITY_VERSION" in
@@ -597,8 +723,6 @@ case "$UBIQUITY_VERSION" in
     ;;
 esac
 
-# Test the Python GTK frontend imports before wasting time rebuilding the
-# SquashFS. This catches mixed-release Ubiquity/library problems at build time.
 PYTHONPATH=/usr/lib/ubiquity python3 - <<'PY_UBIQUITY_TEST'
 import ubiquity
 import ubiquity.frontend.gtk_ui
@@ -640,7 +764,14 @@ for critical in ubiquity ubiquity-frontend-gtk systemd initramfs-tools gdm3 gnom
 done
 rm -f "$casper_simulation"
 
-apt-get install -y --reinstall --no-install-recommends casper
+if [[ "${TREBO_QUICK:-0}" == "1" ]] && \
+   [[ "$(dpkg-query -W -f='${db:Status-Status}' casper 2>/dev/null || true)" == "installed" ]] && \
+   [[ -f /usr/share/initramfs-tools/scripts/casper ]] && \
+   [[ -f /usr/share/initramfs-tools/hooks/casper ]]; then
+  echo "QUICK MODE: existing Casper is healthy; skipping its reinstall."
+else
+  apt-get install -y --reinstall --no-install-recommends casper
+fi
 
 # initramfs-tools dispatches the root-mount script through /scripts/$BOOT.
 # Without BOOT=casper, a freshly generated initrd can be perfectly valid for
@@ -1102,9 +1233,17 @@ fi
 # theme, the machine briefly shows Ubuntu and only switches to Trebo after the
 # real root filesystem mounts.
 KVER="$(cat /tmp/trebo-kernel-version)"
-echo "Rebuilding Linux 7 LIVE initramfs with Casper + Trebo Plymouth..."
-rm -f "/boot/initrd.img-$KVER"
-BOOT=casper update-initramfs -c -k "$KVER"
+if [[ "${TREBO_QUICK:-0}" == "1" && "${TREBO_REFRESH_INITRD:-0}" != "1" ]]; then
+  echo "QUICK MODE: preserving existing Linux 7 kernel and initramfs."
+  [[ -f "/boot/initrd.img-$KVER" ]] || {
+    echo "Quick mode cannot preserve a missing initramfs: /boot/initrd.img-$KVER" >&2
+    exit 1
+  }
+else
+  echo "Rebuilding Linux 7 LIVE initramfs with Casper + Trebo Plymouth..."
+  rm -f "/boot/initrd.img-$KVER"
+  BOOT=casper update-initramfs -c -k "$KVER"
+fi
 
 # Capture the complete listing ONCE, then inspect the file. Do not use
 # "lsinitramfs | grep -q" while pipefail is enabled: grep -q exits as soon as
@@ -1217,7 +1356,20 @@ cp -L /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
 
 echo "Customizing Trebo root filesystem..."
 CHROOT_LOG="$WORKDIR/trebo-chroot.log"
-if [[ "$RESUME" == "1" ]]; then
+if [[ "$QUICK" == "1" ]]; then
+  if ! chroot "$ROOTFS" /usr/bin/env \
+    TREBO_RESUME_AFTER_UPGRADE=1 \
+    TREBO_QUICK=1 \
+    TREBO_REFRESH_INITRD="$REFRESH_INITRD" \
+    /bin/bash /tmp/trebo-customize.sh 2>&1 | tee "$CHROOT_LOG"; then
+    rc=${PIPESTATUS[0]}
+    echo >&2
+    echo "Trebo QUICK customization failed inside the chroot (exit $rc)." >&2
+    echo "The exact inner command is shown above. Last 80 log lines:" >&2
+    tail -n 80 "$CHROOT_LOG" >&2 || true
+    exit "$rc"
+  fi
+elif [[ "$RESUME" == "1" ]]; then
   if ! chroot "$ROOTFS" /usr/bin/env TREBO_RESUME_AFTER_UPGRADE=1 /bin/bash /tmp/trebo-customize.sh 2>&1 | tee "$CHROOT_LOG"; then
     rc=${PIPESTATUS[0]}
     echo >&2
@@ -1257,7 +1409,9 @@ KVER="$(cat "$ROOTFS/tmp/trebo-kernel-version")"
 cp "$ROOTFS/boot/vmlinuz-$KVER" "$ISO_DIR/casper/vmlinuz"
 cp "$ROOTFS/boot/initrd.img-$KVER" "$ISO_DIR/casper/initrd"
 
-# Keep the version marker until after the live kernel has been copied.
+# Keep a persistent host-side marker for future --quick runs, while removing
+# the temporary marker from the filesystem that is shipped in the ISO.
+printf '%s\n' "$KVER" > "$WORKDIR/kernel-version"
 rm -f "$ROOTFS/tmp/trebo-kernel-version"
 
 # Media identity.
