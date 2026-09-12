@@ -242,17 +242,16 @@ fi
 }
 echo "Final Trebo live kernel: $KVER"
 
-# Rebrand the operating-system identity. On Focal /etc/os-release normally
-# points at /usr/lib/os-release, so write the canonical target directly.
+# Rebrand the final Noble-based userspace as Trebo.
 cat > /usr/lib/os-release <<'EOF_OS_RELEASE'
 NAME="Trebo Linux"
-PRETTY_NAME="Trebo Linux 20.04.6"
+PRETTY_NAME="Trebo Linux 1.0"
 ID=trebo
 ID_LIKE="ubuntu debian"
-VERSION_ID="20.04"
-VERSION="20.04.6"
-VERSION_CODENAME=focal
-UBUNTU_CODENAME=focal
+VERSION_ID="1.0"
+VERSION="1.0"
+VERSION_CODENAME=trebo
+UBUNTU_CODENAME=noble
 HOME_URL="https://github.com/itswiktoragain/Trebo"
 SUPPORT_URL="https://github.com/itswiktoragain/Trebo"
 BUG_REPORT_URL="https://github.com/itswiktoragain/Trebo/issues"
@@ -261,13 +260,13 @@ ln -sfn /usr/lib/os-release /etc/os-release
 
 cat > /etc/lsb-release <<'EOF_LSB'
 DISTRIB_ID=Trebo
-DISTRIB_RELEASE=20.04
-DISTRIB_CODENAME=focal
-DISTRIB_DESCRIPTION="Trebo Linux 20.04.6"
+DISTRIB_RELEASE=1.0
+DISTRIB_CODENAME=trebo
+DISTRIB_DESCRIPTION="Trebo Linux 1.0"
 EOF_LSB
 
-printf 'Trebo Linux 20.04.6 \\n \\l\n' > /etc/issue
-printf 'Trebo Linux 20.04.6\n' > /etc/issue.net
+printf 'Trebo Linux 1.0 \\n \\l\n' > /etc/issue
+printf 'Trebo Linux 1.0\n' > /etc/issue.net
 
 # Remove only visible Ubuntu session/desktop payloads from the finished image.
 # No package database operation is used here.
@@ -496,7 +495,7 @@ cp "$ROOTFS/boot/initrd.img-$KVER" "$ISO_DIR/casper/initrd"
 rm -f "$ROOTFS/tmp/trebo-kernel-version"
 
 # Media identity.
-printf '%s\n' 'Trebo Linux 20.04.6 - Release amd64' > "$ISO_DIR/.disk/info"
+printf '%s\n' 'Trebo Linux 1.0 - Release amd64' > "$ISO_DIR/.disk/info"
 
 if [[ -f "$ISO_DIR/README.diskdefines" ]]; then
   sed -i 's/Ubuntu/Trebo Linux/g' "$ISO_DIR/README.diskdefines"
