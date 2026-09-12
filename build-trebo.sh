@@ -4,7 +4,7 @@ set -Eeuo pipefail
 BASE_ISO_URL="${BASE_ISO_URL:-https://releases.ubuntu.com/focal/ubuntu-20.04.6-desktop-amd64.iso}"
 BASE_ISO_SHA256="${BASE_ISO_SHA256:-510ce77afcb9537f198bc7daa0e5b503b6e67aaed68146943c231baeaab94df1}"
 BASE_ISO="${BASE_ISO:-$PWD/ubuntu-20.04.6-desktop-amd64.iso}"
-OUTPUT_ISO="${OUTPUT_ISO:-$PWD/Trebo-20.04.6-amd64.iso}"
+OUTPUT_ISO="${OUTPUT_ISO:-$PWD/Trebo-radiant-redpanda-1.0.iso}"
 WORKDIR="${WORKDIR:-$PWD/trebo-work}"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -284,6 +284,7 @@ install_customization_packages() {
 
     gnome-session-canberra
     python3-gi
+    python3-apt
     gir1.2-gtk-3.0
     policykit-1
   )
@@ -861,12 +862,13 @@ chmod +x /usr/share/initramfs-tools/scripts/casper /usr/share/initramfs-tools/ho
 # Rebrand the final Noble-based userspace as Trebo.
 cat > /usr/lib/os-release <<'EOF_OS_RELEASE'
 NAME="Trebo Linux"
-PRETTY_NAME="Trebo Linux 1.0"
+PRETTY_NAME="Trebo Linux 1.0 (Radiant Redpanda)"
 ID=trebo
 ID_LIKE="ubuntu debian"
 VERSION_ID="1.0"
-VERSION="1.0"
-VERSION_CODENAME=trebo
+VERSION="1.0 (Radiant Redpanda)"
+VERSION_CODENAME=radiant-redpanda
+TREBO_CODENAME="Radiant Redpanda"
 UBUNTU_CODENAME=noble
 HOME_URL="https://github.com/itswiktoragain/Trebo"
 SUPPORT_URL="https://github.com/itswiktoragain/Trebo"
@@ -880,11 +882,11 @@ DISTRIB_RELEASE=1.0
 # Keep the archive suite real. Ubiquity's choose-mirror reads this exact
 # field and would otherwise try to use a nonexistent "trebo" Ubuntu suite.
 DISTRIB_CODENAME=noble
-DISTRIB_DESCRIPTION="Trebo Linux 1.0"
+DISTRIB_DESCRIPTION="Trebo Linux 1.0 (Radiant Redpanda)"
 EOF_LSB
 
-printf 'Trebo Linux 1.0 \\n \\l\n' > /etc/issue
-printf 'Trebo Linux 1.0\n' > /etc/issue.net
+printf 'Trebo Linux 1.0 (Radiant Redpanda) \\n \\l\n' > /etc/issue
+printf 'Trebo Linux 1.0 (Radiant Redpanda)\n' > /etc/issue.net
 
 # Brand the Casper live session itself. The installed machine's hostname is
 # still chosen by Ubiquity and written into /target during installation.
@@ -997,170 +999,659 @@ install -Dm0644 /tmp/trebo-assets/trebo-symbolic.svg \
 mkdir -p /usr/lib/trebo
 
 cat > /usr/lib/trebo/trebo-updater-helper <<'EOF_TREBO_UPDATE_HELPER'
-#!/bin/sh
-set -eu
+#!/usr/bin/env python3
+import json
+import os
+import subprocess
+import sys
 
-action="${1:-}"
-APT_LOCK="-o DPkg::Lock::Timeout=120"
+import apt
 
-case "$action" in
-  check)
-    apt-get $APT_LOCK update -qq
-    apt list --upgradable 2>/dev/null || true
-    ;;
-  install)
-    apt-get $APT_LOCK update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get $APT_LOCK -y --no-remove --with-new-pkgs upgrade
-    dpkg --audit
-    apt-get $APT_LOCK check
-    printf '\nTREBO_REMAINING_UPDATES\n'
-    apt list --upgradable 2>/dev/null || true
-    if [ -e /run/reboot-required ]; then
-      printf '\nTREBO_RESTART_REQUIRED\n'
-    fi
-    ;;
-  *)
-    echo "Usage: trebo-updater-helper {check|install}" >&2
-    exit 2
-    ;;
-esac
+APT_OPTS = ["-o", "DPkg::Lock::Timeout=120"]
+
+
+def run(cmd):
+    return subprocess.run(
+        cmd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+
+
+def refresh_lists():
+    proc = run(["apt-get", *APT_OPTS, "update", "-qq"])
+    if proc.returncode != 0:
+        print(json.dumps({
+            "ok": False,
+            "error": proc.stdout.strip() or "apt-get update failed",
+        }))
+        raise SystemExit(proc.returncode)
+
+
+def get_updates():
+    cache = apt.Cache()
+    rows = []
+
+    for pkg in cache:
+        if not pkg.is_upgradable or pkg.installed is None or pkg.candidate is None:
+            continue
+
+        origins = list(pkg.candidate.origins)
+        security = any(
+            "security" in (origin.archive or "").lower()
+            or "security" in (origin.label or "").lower()
+            for origin in origins
+        )
+        origin_names = []
+        for origin in origins:
+            label = origin.label or origin.origin or origin.site or "Ubuntu"
+            archive = origin.archive or ""
+            name = f"{label} ({archive})" if archive else label
+            if name not in origin_names:
+                origin_names.append(name)
+
+        update_type = "security" if security else (
+            "kernel" if pkg.name.startswith(("linux-image-", "linux-headers-", "linux-modules-"))
+            else "software"
+        )
+
+        rows.append({
+            "name": pkg.name,
+            "installed": pkg.installed.version,
+            "candidate": pkg.candidate.version,
+            "size": int(pkg.candidate.size or 0),
+            "summary": pkg.candidate.summary or "",
+            "description": pkg.candidate.description or pkg.candidate.summary or "",
+            "origin": ", ".join(origin_names) if origin_names else "Ubuntu",
+            "type": update_type,
+        })
+
+    rows.sort(key=lambda row: (
+        0 if row["type"] == "security" else 1 if row["type"] == "kernel" else 2,
+        row["name"],
+    ))
+    return rows
+
+
+def cmd_check():
+    refresh_lists()
+    print(json.dumps({"ok": True, "updates": get_updates()}))
+
+
+def cmd_install(names):
+    if not names:
+        print(json.dumps({"ok": False, "error": "No updates were selected."}))
+        raise SystemExit(2)
+
+    cache = apt.Cache()
+    valid = []
+    for name in names:
+        if name not in cache:
+            continue
+        pkg = cache[name]
+        if pkg.is_upgradable:
+            valid.append(name)
+
+    if not valid:
+        print(json.dumps({"ok": True, "output": "Selected updates are already current.", "restart_required": False}))
+        return
+
+    refresh_lists()
+
+    proc = run([
+        "apt-get", *APT_OPTS,
+        "-y", "--no-remove", "--only-upgrade",
+        "install", *valid,
+    ])
+
+    audit = run(["dpkg", "--audit"])
+    check = run(["apt-get", *APT_OPTS, "check"])
+
+    ok = proc.returncode == 0 and audit.returncode == 0 and check.returncode == 0
+    output = "\n".join(part for part in (
+        proc.stdout.strip(),
+        audit.stdout.strip(),
+        check.stdout.strip(),
+    ) if part)
+
+    print(json.dumps({
+        "ok": ok,
+        "output": output,
+        "restart_required": os.path.exists("/run/reboot-required"),
+        "remaining": get_updates() if ok else [],
+    }))
+
+    if not ok:
+        raise SystemExit(proc.returncode or audit.returncode or check.returncode or 1)
+
+
+def main():
+    action = sys.argv[1] if len(sys.argv) > 1 else ""
+    if action == "check":
+        cmd_check()
+    elif action == "install":
+        cmd_install(sys.argv[2:])
+    else:
+        print(json.dumps({"ok": False, "error": "Usage: trebo-updater-helper {check|install} [packages...]"}))
+        raise SystemExit(2)
+
+
+if __name__ == "__main__":
+    main()
 EOF_TREBO_UPDATE_HELPER
 chmod 0755 /usr/lib/trebo/trebo-updater-helper
 
 cat > /usr/lib/trebo/trebo-updater.py <<'PY_TREBO_UPDATER'
 #!/usr/bin/env python3
+import json
 import subprocess
 import threading
 
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import GLib, Gtk
+from gi.repository import Gdk, GLib, Gtk, Pango
 
 HELPER = "/usr/lib/trebo/trebo-updater-helper"
+
+COL_SELECTED = 0
+COL_ICON = 1
+COL_NAME = 2
+COL_OLD = 3
+COL_NEW = 4
+COL_ORIGIN = 5
+COL_SIZE_TEXT = 6
+COL_SIZE = 7
+COL_SUMMARY = 8
+COL_DESCRIPTION = 9
+COL_TYPE = 10
+
+
+def format_size(size):
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{int(size)} B"
 
 
 class TreboUpdater(Gtk.Window):
     def __init__(self):
         super().__init__(title="Trebo Updater")
-        self.set_default_size(720, 500)
-        self.set_border_width(18)
+        self.set_default_size(980, 650)
         self.set_icon_name("trebo-symbolic")
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_border_width(0)
 
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
-        self.add(outer)
+        self.busy = False
+        self.restart_required = False
 
-        title = Gtk.Label()
-        title.set_markup("<span size='xx-large' weight='bold'>Trebo Updater</span>")
-        title.set_xalign(0)
-        outer.pack_start(title, False, False, 0)
+        self.model = Gtk.ListStore(
+            bool, str, str, str, str, str, str, int, str, str, str
+        )
 
-        subtitle = Gtk.Label(label="Keep Trebo Linux and installed applications up to date.")
-        subtitle.set_xalign(0)
-        outer.pack_start(subtitle, False, False, 0)
+        self._build_header()
+        self._build_ui()
+        self._install_css()
 
-        self.status = Gtk.Label(label="Ready to check for updates.")
-        self.status.set_xalign(0)
-        outer.pack_start(self.status, False, False, 0)
+        self.connect("destroy", Gtk.main_quit)
+        GLib.idle_add(self.refresh)
+
+    def _build_header(self):
+        header = Gtk.HeaderBar()
+        header.set_show_close_button(True)
+        header.set_title("Trebo Updater")
+        header.set_subtitle("Trebo Linux 1.0 - Radiant Redpanda")
+        self.set_titlebar(header)
+
+        self.refresh_button = Gtk.Button()
+        self.refresh_button.set_tooltip_text("Refresh update information (Ctrl+R)")
+        self.refresh_button.add(Gtk.Image.new_from_icon_name(
+            "view-refresh-symbolic", Gtk.IconSize.BUTTON))
+        self.refresh_button.connect("clicked", lambda *_: self.refresh())
+        header.pack_start(self.refresh_button)
+
+        menu_button = Gtk.MenuButton()
+        menu_button.set_tooltip_text("More options")
+        menu_button.add(Gtk.Image.new_from_icon_name(
+            "open-menu-symbolic", Gtk.IconSize.BUTTON))
+
+        menu = Gtk.Menu()
+
+        sources = Gtk.MenuItem(label="Software & Updates")
+        sources.connect("activate", lambda *_: subprocess.Popen(["software-properties-gtk"]))
+        menu.append(sources)
+
+        history = Gtk.MenuItem(label="View update history")
+        history.connect("activate", lambda *_: self.show_history())
+        menu.append(history)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        about = Gtk.MenuItem(label="About Trebo Updater")
+        about.connect("activate", lambda *_: self.show_about())
+        menu.append(about)
+
+        menu.show_all()
+        menu_button.set_popup(menu)
+        header.pack_end(menu_button)
+
+    def _build_ui(self):
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.add(root)
+
+        self.infobar = Gtk.InfoBar()
+        self.infobar.set_message_type(Gtk.MessageType.WARNING)
+        self.infobar_label = Gtk.Label(label="")
+        self.infobar_label.set_xalign(0)
+        self.infobar.get_content_area().add(self.infobar_label)
+        self.restart_button = self.infobar.add_button("Restart now", Gtk.ResponseType.OK)
+        self.infobar.connect("response", self.on_infobar_response)
+        self.infobar.set_no_show_all(True)
+        root.pack_start(self.infobar, False, False, 0)
+
+        toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        toolbar.set_border_width(10)
+        root.pack_start(toolbar, False, False, 0)
+
+        self.select_all_button = Gtk.Button(label="Select All")
+        self.select_all_button.connect("clicked", lambda *_: self.set_all_selected(True))
+        toolbar.pack_start(self.select_all_button, False, False, 0)
+
+        self.clear_button = Gtk.Button(label="Clear")
+        self.clear_button.connect("clicked", lambda *_: self.set_all_selected(False))
+        toolbar.pack_start(self.clear_button, False, False, 0)
+
+        self.install_button = Gtk.Button(label="Install Updates")
+        self.install_button.get_style_context().add_class("suggested-action")
+        self.install_button.connect("clicked", lambda *_: self.install_selected())
+        toolbar.pack_end(self.install_button, False, False, 0)
+
+        self.summary_label = Gtk.Label(label="Checking for updates...")
+        self.summary_label.set_xalign(0)
+        self.summary_label.set_hexpand(True)
+        toolbar.pack_start(self.summary_label, True, True, 8)
+
+        self.spinner = Gtk.Spinner()
+        toolbar.pack_end(self.spinner, False, False, 4)
+
+        self.stack = Gtk.Stack()
+        self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        root.pack_start(self.stack, True, True, 0)
+
+        updates_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.stack.add_named(updates_page, "updates")
+
+        paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
+        paned.set_position(410)
+        updates_page.pack_start(paned, True, True, 0)
 
         scroller = Gtk.ScrolledWindow()
-        scroller.set_hexpand(True)
-        scroller.set_vexpand(True)
-        outer.pack_start(scroller, True, True, 0)
+        scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        paned.pack1(scroller, True, False)
 
-        self.output = Gtk.TextView()
-        self.output.set_editable(False)
-        self.output.set_cursor_visible(False)
-        self.output.set_monospace(True)
-        self.output.set_wrap_mode(Gtk.WrapMode.NONE)
-        scroller.add(self.output)
+        self.tree = Gtk.TreeView(model=self.model)
+        self.tree.set_headers_clickable(True)
+        self.tree.set_enable_search(True)
+        self.tree.set_search_column(COL_NAME)
+        self.tree.get_selection().connect("changed", self.on_selection_changed)
+        scroller.add(self.tree)
 
-        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        outer.pack_start(actions, False, False, 0)
+        toggle = Gtk.CellRendererToggle()
+        toggle.set_property("activatable", True)
+        toggle.connect("toggled", self.on_toggled)
+        col = Gtk.TreeViewColumn("Upgrade", toggle, active=COL_SELECTED)
+        col.set_sort_column_id(COL_SELECTED)
+        self.tree.append_column(col)
 
-        self.check_button = Gtk.Button(label="Check for updates")
-        self.check_button.connect("clicked", lambda *_: self.run_action("check"))
-        actions.pack_start(self.check_button, False, False, 0)
+        type_renderer = Gtk.CellRendererPixbuf()
+        col = Gtk.TreeViewColumn("Type", type_renderer, icon_name=COL_ICON)
+        col.set_min_width(52)
+        self.tree.append_column(col)
 
-        self.install_button = Gtk.Button(label="Install updates")
-        self.install_button.get_style_context().add_class("suggested-action")
-        self.install_button.connect("clicked", lambda *_: self.run_action("install"))
-        actions.pack_start(self.install_button, False, False, 0)
+        self._append_text_column("Package", COL_NAME, 200)
+        self._append_text_column("Installed Version", COL_OLD, 150)
+        self._append_text_column("New Version", COL_NEW, 150)
+        self._append_text_column("Origin", COL_ORIGIN, 180)
+        self._append_text_column("Size", COL_SIZE_TEXT, 90)
 
-        close_button = Gtk.Button(label="Close")
-        close_button.connect("clicked", lambda *_: self.close())
-        actions.pack_end(close_button, False, False, 0)
+        details = Gtk.Notebook()
+        paned.pack2(details, True, False)
 
-    def set_busy(self, busy):
-        self.check_button.set_sensitive(not busy)
-        self.install_button.set_sensitive(not busy)
+        self.description = Gtk.TextView()
+        self.description.set_editable(False)
+        self.description.set_cursor_visible(False)
+        self.description.set_wrap_mode(Gtk.WrapMode.WORD)
+        self.description.set_left_margin(12)
+        self.description.set_right_margin(12)
+        self.description.set_top_margin(10)
+        self.description.set_bottom_margin(10)
+        desc_scroll = Gtk.ScrolledWindow()
+        desc_scroll.add(self.description)
+        details.append_page(desc_scroll, Gtk.Label(label="Description"))
 
-    def set_text(self, text):
-        buf = self.output.get_buffer()
-        buf.set_text(text.strip() + ("\n" if text.strip() else ""))
+        self.info = Gtk.TextView()
+        self.info.set_editable(False)
+        self.info.set_cursor_visible(False)
+        self.info.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self.info.set_left_margin(12)
+        self.info.set_right_margin(12)
+        self.info.set_top_margin(10)
+        self.info.set_bottom_margin(10)
+        info_scroll = Gtk.ScrolledWindow()
+        info_scroll.add(self.info)
+        details.append_page(info_scroll, Gtk.Label(label="Details"))
 
-    def run_action(self, action):
-        self.set_busy(True)
-        self.status.set_text(
-            "Checking package repositories..."
-            if action == "check"
-            else "Installing updates safely..."
-        )
-        self.set_text("Administrator authorization may be requested.")
-        threading.Thread(target=self.worker, args=(action,), daemon=True).start()
+        empty = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        empty.set_valign(Gtk.Align.CENTER)
+        empty.set_halign(Gtk.Align.CENTER)
+        empty_icon = Gtk.Image.new_from_icon_name(
+            "emblem-ok-symbolic", Gtk.IconSize.DIALOG)
+        empty.pack_start(empty_icon, False, False, 0)
+        self.empty_title = Gtk.Label()
+        self.empty_title.set_markup("<span size='xx-large' weight='bold'>Your system is up to date</span>")
+        empty.pack_start(self.empty_title, False, False, 0)
+        empty.pack_start(Gtk.Label(label="Trebo Linux has no pending package updates."), False, False, 0)
+        self.stack.add_named(empty, "empty")
 
-    def worker(self, action):
+        error = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        error.set_valign(Gtk.Align.CENTER)
+        error.set_halign(Gtk.Align.CENTER)
+        error.pack_start(Gtk.Image.new_from_icon_name(
+            "dialog-error-symbolic", Gtk.IconSize.DIALOG), False, False, 0)
+        error_title = Gtk.Label()
+        error_title.set_markup("<span size='xx-large' weight='bold'>Could not check for updates</span>")
+        error.pack_start(error_title, False, False, 0)
+        self.error_label = Gtk.Label()
+        self.error_label.set_line_wrap(True)
+        self.error_label.set_max_width_chars(70)
+        error.pack_start(self.error_label, False, False, 0)
+        retry = Gtk.Button(label="Try Again")
+        retry.connect("clicked", lambda *_: self.refresh())
+        error.pack_start(retry, False, False, 0)
+        self.stack.add_named(error, "error")
+
+        accel = Gtk.AccelGroup()
+        self.add_accel_group(accel)
+        self._add_accel(self.refresh_button, "<Control>R", accel)
+        self._add_accel(self.select_all_button, "<Control>A", accel)
+        self._add_accel(self.clear_button, "<Control><Shift>A", accel)
+        self._add_accel(self.install_button, "<Control>I", accel)
+
+        self.update_selection_summary()
+
+    def _append_text_column(self, title, index, width):
+        renderer = Gtk.CellRendererText()
+        renderer.set_property("ellipsize", Pango.EllipsizeMode.END)
+        col = Gtk.TreeViewColumn(title, renderer, text=index)
+        col.set_sort_column_id(index)
+        col.set_resizable(True)
+        col.set_min_width(width)
+        self.tree.append_column(col)
+
+    def _add_accel(self, button, spec, group):
+        key, mod = Gtk.accelerator_parse(spec)
+        button.add_accelerator("clicked", group, key, mod, Gtk.AccelFlags.VISIBLE)
+
+    def _install_css(self):
+        css = Gtk.CssProvider()
+        css.load_from_data(b"""
+treeview.view:selected {
+    background-color: #3584e4;
+}
+infobar.warning {
+    background-color: #5a4300;
+}
+""")
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+    def set_busy(self, busy, message=None):
+        self.busy = busy
+        for widget in (
+            self.refresh_button,
+            self.select_all_button,
+            self.clear_button,
+            self.install_button,
+            self.tree,
+        ):
+            widget.set_sensitive(not busy)
+
+        if busy:
+            self.spinner.start()
+            if message:
+                self.summary_label.set_text(message)
+        else:
+            self.spinner.stop()
+            self.update_selection_summary()
+
+    def refresh(self):
+        if self.busy:
+            return False
+        self.set_busy(True, "Refreshing package information...")
+        threading.Thread(target=self._worker_check, daemon=True).start()
+        return False
+
+    def _worker_check(self):
+        result = self._run_helper(["check"])
+        GLib.idle_add(self._finish_check, result)
+
+    def _run_helper(self, args):
         try:
             proc = subprocess.run(
-                ["pkexec", HELPER, action],
+                ["pkexec", HELPER, *args],
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 check=False,
             )
-            output = proc.stdout or ""
-            if proc.returncode == 0:
-                if action == "check":
-                    lines = [
-                        line for line in output.splitlines()
-                        if line and not line.startswith("Listing...")
-                    ]
-                    if lines:
-                        message = f"{len(lines)} update(s) available."
-                        body = "\n".join(lines)
-                    else:
-                        message = "Trebo is up to date."
-                        body = "No package updates are available."
-                else:
-                    restart_required = "TREBO_RESTART_REQUIRED" in output
-                    output = output.replace("TREBO_RESTART_REQUIRED", "")
-                    output = output.replace("TREBO_REMAINING_UPDATES", "\nRemaining updates:")
-                    message = (
-                        "Updates installed. Restart required."
-                        if restart_required
-                        else "Updates installed successfully."
-                    )
-                    body = output
-            elif proc.returncode == 126:
-                message = "Update cancelled."
-                body = output or "Administrator authorization was cancelled."
-            else:
-                message = "Updater encountered an error."
-                body = output or f"Update helper exited with status {proc.returncode}."
+            raw = (proc.stdout or "").strip()
+            try:
+                data = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                data = {"ok": False, "error": raw or f"Helper exited with status {proc.returncode}."}
+            data["_returncode"] = proc.returncode
+            return data
         except Exception as exc:
-            message = "Updater encountered an error."
-            body = str(exc)
+            return {"ok": False, "error": str(exc), "_returncode": 1}
 
-        GLib.idle_add(self.finish_action, message, body)
+    def _finish_check(self, result):
+        self.model.clear()
+        if not result.get("ok"):
+            self.error_label.set_text(result.get("error", "Unknown update error."))
+            self.stack.set_visible_child_name("error")
+            self.set_busy(False)
+            return False
 
-    def finish_action(self, message, body):
-        self.status.set_text(message)
-        self.set_text(body)
+        updates = result.get("updates", [])
+        for row in updates:
+            icon = {
+                "security": "security-high-symbolic",
+                "kernel": "computer-symbolic",
+                "software": "package-x-generic-symbolic",
+            }.get(row.get("type"), "package-x-generic-symbolic")
+            self.model.append([
+                True,
+                icon,
+                row.get("name", ""),
+                row.get("installed", ""),
+                row.get("candidate", ""),
+                row.get("origin", ""),
+                format_size(row.get("size", 0)),
+                int(row.get("size", 0)),
+                row.get("summary", ""),
+                row.get("description", ""),
+                row.get("type", "software"),
+            ])
+
+        self.stack.set_visible_child_name("updates" if updates else "empty")
         self.set_busy(False)
+        self.update_selection_summary()
         return False
+
+    def on_toggled(self, renderer, path):
+        treeiter = self.model.get_iter(path)
+        self.model[treeiter][COL_SELECTED] = not self.model[treeiter][COL_SELECTED]
+        self.update_selection_summary()
+
+    def set_all_selected(self, selected):
+        for row in self.model:
+            row[COL_SELECTED] = selected
+        self.update_selection_summary()
+
+    def update_selection_summary(self):
+        if self.busy:
+            return
+        selected = [row for row in self.model if row[COL_SELECTED]]
+        total = sum(row[COL_SIZE] for row in selected)
+        total_updates = len(self.model)
+        if total_updates == 0:
+            self.summary_label.set_text("No updates available")
+            self.install_button.set_sensitive(False)
+            return
+
+        self.install_button.set_sensitive(bool(selected))
+        if selected:
+            self.summary_label.set_text(
+                f"{len(selected)} of {total_updates} updates selected - {format_size(total)} download"
+            )
+        else:
+            self.summary_label.set_text(f"{total_updates} updates available - none selected")
+
+    def on_selection_changed(self, selection):
+        model, treeiter = selection.get_selected()
+        if treeiter is None:
+            return
+
+        name = model[treeiter][COL_NAME]
+        summary = model[treeiter][COL_SUMMARY]
+        description = model[treeiter][COL_DESCRIPTION]
+        update_type = model[treeiter][COL_TYPE]
+        old = model[treeiter][COL_OLD]
+        new = model[treeiter][COL_NEW]
+        origin = model[treeiter][COL_ORIGIN]
+        size = model[treeiter][COL_SIZE_TEXT]
+
+        self.description.get_buffer().set_text(
+            f"{summary}\n\n{description}".strip()
+        )
+        self.info.get_buffer().set_text(
+            f"Package: {name}\n"
+            f"Type: {update_type.title()}\n"
+            f"Installed version: {old}\n"
+            f"New version: {new}\n"
+            f"Origin: {origin}\n"
+            f"Download size: {size}"
+        )
+
+    def install_selected(self):
+        names = [row[COL_NAME] for row in self.model if row[COL_SELECTED]]
+        if not names or self.busy:
+            return
+
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.CANCEL,
+            text=f"Install {len(names)} selected update{'s' if len(names) != 1 else ''}?",
+        )
+        dialog.format_secondary_text(
+            "Administrator authorization will be requested. Trebo Updater will not remove packages."
+        )
+        dialog.add_button("Install Updates", Gtk.ResponseType.OK)
+        response = dialog.run()
+        dialog.destroy()
+        if response != Gtk.ResponseType.OK:
+            return
+
+        self.set_busy(True, "Installing selected updates...")
+        threading.Thread(target=self._worker_install, args=(names,), daemon=True).start()
+
+    def _worker_install(self, names):
+        result = self._run_helper(["install", *names])
+        GLib.idle_add(self._finish_install, result)
+
+    def _finish_install(self, result):
+        if not result.get("ok"):
+            self.show_error_dialog(
+                "Update installation failed",
+                result.get("error") or result.get("output") or "Unknown update error.",
+            )
+            self.set_busy(False)
+            return False
+
+        self.restart_required = bool(result.get("restart_required"))
+        if self.restart_required:
+            self.infobar_label.set_text("Updates were installed successfully. A restart is required.")
+            self.infobar.show_all()
+        else:
+            self.infobar.hide()
+
+        self.set_busy(False)
+        self.refresh()
+        return False
+
+    def show_error_dialog(self, title, message):
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.CLOSE,
+            text=title,
+        )
+        dialog.format_secondary_text(message[-5000:])
+        dialog.run()
+        dialog.destroy()
+
+    def on_infobar_response(self, bar, response):
+        if response == Gtk.ResponseType.OK:
+            subprocess.Popen(["pkexec", "systemctl", "reboot"])
+
+    def show_history(self):
+        try:
+            text = subprocess.run(
+                ["sh", "-c", "zcat -f /var/log/apt/history.log* 2>/dev/null | tail -n 500"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+            ).stdout
+        except Exception as exc:
+            text = str(exc)
+
+        dialog = Gtk.Dialog(
+            title="Update History",
+            transient_for=self,
+            modal=True,
+        )
+        dialog.set_default_size(760, 500)
+        dialog.add_button("Close", Gtk.ResponseType.CLOSE)
+        view = Gtk.TextView()
+        view.set_editable(False)
+        view.set_cursor_visible(False)
+        view.set_monospace(True)
+        view.get_buffer().set_text(text or "No APT update history is available.")
+        scroller = Gtk.ScrolledWindow()
+        scroller.add(view)
+        dialog.get_content_area().pack_start(scroller, True, True, 0)
+        dialog.show_all()
+        dialog.run()
+        dialog.destroy()
+
+    def show_about(self):
+        about = Gtk.AboutDialog(transient_for=self, modal=True)
+        about.set_program_name("Trebo Updater")
+        about.set_version("1.0")
+        about.set_comments("Update manager for Trebo Linux 1.0 - Radiant Redpanda")
+        about.set_logo_icon_name("trebo-symbolic")
+        about.run()
+        about.destroy()
 
 
 win = TreboUpdater()
-win.connect("destroy", Gtk.main_quit)
 win.show_all()
 Gtk.main()
 PY_TREBO_UPDATER
@@ -1171,7 +1662,7 @@ cat > /usr/share/applications/trebo-updater.desktop <<'EOF_TREBO_UPDATER_DESKTOP
 Type=Application
 Name=Trebo Updater
 GenericName=Software Updates
-Comment=Check for and install Trebo Linux updates
+Comment=Check for and install Trebo Linux Radiant Redpanda updates
 Exec=/usr/lib/trebo/trebo-updater.py
 Icon=trebo-symbolic
 Terminal=false
@@ -2857,7 +3348,7 @@ printf '%s\n' "$KVER" > "$WORKDIR/kernel-version"
 rm -f "$ROOTFS/tmp/trebo-kernel-version"
 
 # Media identity.
-printf '%s\n' 'Trebo Linux 1.0 - Release amd64' > "$ISO_DIR/.disk/info"
+printf '%s\n' 'Trebo Linux 1.0 (Radiant Redpanda) - Release amd64' > "$ISO_DIR/.disk/info"
 
 if [[ -f "$ISO_DIR/README.diskdefines" ]]; then
   sed -i 's/Ubuntu/Trebo Linux/g' "$ISO_DIR/README.diskdefines"
@@ -2928,7 +3419,7 @@ printf '%s\n' "$(du -sx --block-size=1 "$ROOTFS" | cut -f1)" \
 echo "Rebuilding SquashFS..."
 rm -f   "$ISO_DIR/casper/filesystem.squashfs"   "$ISO_DIR/casper/filesystem.squashfs.gpg"
 
-mksquashfs "$ROOTFS" "$ISO_DIR/casper/filesystem.squashfs"   -comp xz -b 1M -noappend -no-progress
+mksquashfs "$ROOTFS" "$ISO_DIR/casper/filesystem.squashfs"   -comp gzip -Xcompression-level 6 -b 1M -noappend -no-progress
 
 echo "Refreshing ISO checksums..."
 (
@@ -2940,7 +3431,7 @@ echo "Refreshing ISO checksums..."
 echo "Creating Trebo ISO..."
 rm -f "$OUTPUT_ISO" "$OUTPUT_ISO.sha256"
 
-xorriso   -indev "$BASE_ISO"   -outdev "$OUTPUT_ISO"   -update_r "$ISO_DIR" /   -volid "TREBO_20_04_6"   -boot_image any replay   -commit
+xorriso   -indev "$BASE_ISO"   -outdev "$OUTPUT_ISO"   -update_r "$ISO_DIR" /   -volid "TREBO_RADIANT_REDPANDA_1_0"   -boot_image any replay   -commit
 
 sha256sum "$OUTPUT_ISO" | tee "$OUTPUT_ISO.sha256"
 
