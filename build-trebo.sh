@@ -2057,7 +2057,6 @@ fi
   echo "Trebo Updater diversion for /usr/bin/update-manager is missing." >&2
   exit 1
 }
-grep -Fq "Installed pure-GTK Trebo Ubiquity progress screen." /dev/null 2>/dev/null || true
 grep -Fq "GdkPixbuf.Pixbuf.new_from_file" "$UBIQUITY_GTK" || {
   echo "Ubiquity is not wired to Trebo's pure-GTK progress screen." >&2
   exit 1
