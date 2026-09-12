@@ -16,7 +16,7 @@ die() {
   exit 1
 }
 
-trap 'echo "Trebo build failed at line $LINENO." >&2' ERR
+trap 'rc=$?; echo "Trebo host build failed at line $LINENO: $BASH_COMMAND (exit $rc)" >&2' ERR
 
 required_commands=(
   curl sha256sum xorriso unsquashfs mksquashfs
@@ -67,6 +67,8 @@ cat > "$ROOTFS/tmp/trebo-customize.sh" <<'CHROOT_EOF'
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C
+
+trap 'rc=$?; echo "Trebo inner build failed at line $LINENO: $BASH_COMMAND (exit $rc)" >&2' ERR
 
 if [[ "${TREBO_RESUME_AFTER_UPGRADE:-0}" != "1" ]]; then
 echo "Preparing Focal only far enough to install Linux 7..."
@@ -691,10 +693,25 @@ rm -f "$ROOTFS/etc/resolv.conf"
 cp -L /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
 
 echo "Customizing Trebo root filesystem..."
+CHROOT_LOG="$WORKDIR/trebo-chroot.log"
 if [[ "$RESUME" == "1" ]]; then
-  chroot "$ROOTFS" /usr/bin/env TREBO_RESUME_AFTER_UPGRADE=1 /bin/bash /tmp/trebo-customize.sh
+  if ! chroot "$ROOTFS" /usr/bin/env TREBO_RESUME_AFTER_UPGRADE=1 /bin/bash /tmp/trebo-customize.sh 2>&1 | tee "$CHROOT_LOG"; then
+    rc=${PIPESTATUS[0]}
+    echo >&2
+    echo "Trebo customization failed inside the chroot (exit $rc)." >&2
+    echo "The exact inner command is shown above. Last 80 log lines:" >&2
+    tail -n 80 "$CHROOT_LOG" >&2 || true
+    exit "$rc"
+  fi
 else
-  chroot "$ROOTFS" /bin/bash /tmp/trebo-customize.sh
+  if ! chroot "$ROOTFS" /bin/bash /tmp/trebo-customize.sh 2>&1 | tee "$CHROOT_LOG"; then
+    rc=${PIPESTATUS[0]}
+    echo >&2
+    echo "Trebo customization failed inside the chroot (exit $rc)." >&2
+    echo "The exact inner command is shown above. Last 80 log lines:" >&2
+    tail -n 80 "$CHROOT_LOG" >&2 || true
+    exit "$rc"
+  fi
 fi
 
 rm -f "$ROOTFS/etc/resolv.conf"
