@@ -201,7 +201,8 @@ guard_dist_upgrade() {
   for critical in \
     ubiquity ubiquity-frontend-gtk casper \
     systemd initramfs-tools grub-pc grub-efi-amd64 \
-    gdm3 gnome-shell
+    gdm3 gnome-shell ubuntu-desktop-minimal ubuntu-session \
+    network-manager dbus udev sudo libc6 python3
   do
     if awk '$1 == "Remv" {print $2}' "$simulation" | grep -Fx "$critical" >/dev/null; then
       echo "Refusing repository upgrade because apt wants to remove critical package: $critical" >&2
@@ -1375,7 +1376,7 @@ show-apps-at-top=false
 dash-max-icon-size=48
 EOF_TREBO_SCHEMA
 
-glib-compile-schemas /usr/share/glib-2.0/schemas
+glib-compile-schemas --strict /usr/share/glib-2.0/schemas
 dconf update
 
 rm -f /etc/skel/.config/dconf/user /root/.config/dconf/user 2>/dev/null || true
@@ -1917,6 +1918,7 @@ rm -rf /var/crash/* 2>/dev/null || true
 dpkg --configure -a
 apt-get -f install -y
 apt-get check
+glib-compile-schemas --strict /usr/share/glib-2.0/schemas
 ldconfig
 update-desktop-database /usr/share/applications 2>/dev/null || true
 update-mime-database /usr/share/mime 2>/dev/null || true
@@ -2011,13 +2013,25 @@ chmod +x "$ROOTFS/tmp/trebo-customize.sh"
 
 mounted=0
 cleanup_mounts() {
-  set +e
+  # Every unmount is individually best-effort. Do NOT use "set +e" here:
+  # this function is also called normally before ISO packaging, and changing
+  # errexit inside a shell function persists in the caller. The old version
+  # accidentally disabled fail-fast behavior for the entire SquashFS/ISO stage.
   if [[ $mounted -eq 1 ]]; then
     umount -lf "$ROOTFS/run" 2>/dev/null || true
     umount -lf "$ROOTFS/sys" 2>/dev/null || true
     umount -lf "$ROOTFS/proc" 2>/dev/null || true
     umount -lf "$ROOTFS/dev/pts" 2>/dev/null || true
     umount -lf "$ROOTFS/dev" 2>/dev/null || true
+    mounted=0
+  fi
+
+  # If the chroot fails, restore the rootfs resolver immediately instead of
+  # leaving a copy of the host's resolv.conf behind until the next run.
+  if [[ -e "$ROOTFS/etc/resolv.conf.trebo-backup" || \
+        -L "$ROOTFS/etc/resolv.conf.trebo-backup" ]]; then
+    rm -f "$ROOTFS/etc/resolv.conf"
+    mv "$ROOTFS/etc/resolv.conf.trebo-backup" "$ROOTFS/etc/resolv.conf"
   fi
 }
 trap cleanup_mounts EXIT
@@ -2026,7 +2040,12 @@ mount --bind /dev "$ROOTFS/dev"
 mount --bind /dev/pts "$ROOTFS/dev/pts"
 mount -t proc proc "$ROOTFS/proc"
 mount -t sysfs sys "$ROOTFS/sys"
-mount --bind /run "$ROOTFS/run"
+
+# Give the chroot a private /run instead of exposing the host's systemd, D-Bus,
+# Wayland, Polkit and user-session sockets. This prevents maintainer scripts
+# and validation code from accidentally talking to the running host desktop.
+mount -t tmpfs -o mode=755,nosuid,nodev tmpfs "$ROOTFS/run"
+mkdir -p "$ROOTFS/run/lock"
 mounted=1
 
 # Recover cleanly from a previous interrupted build before replacing DNS for
@@ -2044,8 +2063,20 @@ cp -L /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
 
 echo "Customizing Trebo root filesystem..."
 CHROOT_LOG="$WORKDIR/trebo-chroot.log"
+
+CHROOT_ENV=(
+  /usr/bin/env -i
+  HOME=/root
+  USER=root
+  LOGNAME=root
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  LANG=C
+  LC_ALL=C
+  DEBIAN_FRONTEND=noninteractive
+)
+
 if [[ "$QUICK" == "1" ]]; then
-  if ! chroot "$ROOTFS" /usr/bin/env \
+  if ! chroot "$ROOTFS" "${CHROOT_ENV[@]}" \
     TREBO_RESUME_AFTER_UPGRADE=1 \
     TREBO_QUICK=1 \
     TREBO_REFRESH_INITRD="$REFRESH_INITRD" \
@@ -2058,7 +2089,9 @@ if [[ "$QUICK" == "1" ]]; then
     exit "$rc"
   fi
 elif [[ "$RESUME" == "1" ]]; then
-  if ! chroot "$ROOTFS" /usr/bin/env TREBO_RESUME_AFTER_UPGRADE=1 /bin/bash /tmp/trebo-customize.sh 2>&1 | tee "$CHROOT_LOG"; then
+  if ! chroot "$ROOTFS" "${CHROOT_ENV[@]}" \
+    TREBO_RESUME_AFTER_UPGRADE=1 \
+    /bin/bash /tmp/trebo-customize.sh 2>&1 | tee "$CHROOT_LOG"; then
     rc=${PIPESTATUS[0]}
     echo >&2
     echo "Trebo customization failed inside the chroot (exit $rc)." >&2
@@ -2067,7 +2100,8 @@ elif [[ "$RESUME" == "1" ]]; then
     exit "$rc"
   fi
 else
-  if ! chroot "$ROOTFS" /bin/bash /tmp/trebo-customize.sh 2>&1 | tee "$CHROOT_LOG"; then
+  if ! chroot "$ROOTFS" "${CHROOT_ENV[@]}" \
+    /bin/bash /tmp/trebo-customize.sh 2>&1 | tee "$CHROOT_LOG"; then
     rc=${PIPESTATUS[0]}
     echo >&2
     echo "Trebo customization failed inside the chroot (exit $rc)." >&2
