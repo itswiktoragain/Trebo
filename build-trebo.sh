@@ -1492,11 +1492,8 @@ if gsettings list-keys org.gnome.desktop.interface 2>/dev/null \
     | grep -Fx accent-color >/dev/null; then
   sed -i "/color-scheme='default'/a accent-color='blue'" \
     /usr/share/glib-2.0/schemas/99_trebo.gschema.override
-  cat >> /etc/dconf/db/gdm.d/00-trebo <<'EOF_TREBO_GDM_ACCENT'
-
-[org/gnome/desktop/interface]
-accent-color='blue'
-EOF_TREBO_GDM_ACCENT
+  sed -i "/color-scheme='default'/a accent-color='blue'" \
+    /etc/dconf/db/gdm.d/00-trebo
 fi
 
 glib-compile-schemas --strict /usr/share/glib-2.0/schemas
